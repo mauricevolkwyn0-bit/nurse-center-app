@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.NurseCenter" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/brand_deep</item>
+    </style>
+</resources>
