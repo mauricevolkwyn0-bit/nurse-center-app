@@ -56,6 +56,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -77,6 +78,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.nursecenter.nurse.R
+import com.nursecenter.nurse.data.ChatAlert
 import com.nursecenter.nurse.data.RequestRealtime
 import com.nursecenter.nurse.data.SupabaseAuth
 import com.nursecenter.nurse.ui.screens.DocumentsScreen
@@ -86,6 +88,8 @@ import com.nursecenter.nurse.ui.screens.MessagesScreen
 import com.nursecenter.nurse.ui.screens.MoreScreen
 import com.nursecenter.nurse.ui.screens.ProfileScreen
 import com.nursecenter.nurse.ui.screens.RequestsScreen
+import com.nursecenter.nurse.ui.screens.ReviewsScreen
+import com.nursecenter.nurse.ui.screens.SupportScreen
 import com.nursecenter.nurse.ui.screens.ScheduleScreen
 import com.nursecenter.nurse.ui.screens.Screen
 import com.nursecenter.nurse.ui.screens.SplashScreen
@@ -167,10 +171,22 @@ private fun MainShell(
         onNavigate(if (active.isSubScreen) Screen.More else Screen.Home)
     }
     val imeVisible = WindowInsets.isImeVisible
+    var openChat by rememberSaveable { mutableStateOf<String?>(null) }
+    // An open conversation takes over the whole screen, like the sub-screens.
+    val inChat = active == Screen.Messages && openChat != null
+
+    // A tapped message notification opens its conversation.
+    val requestedChat by ChatAlert.requestedConversation.collectAsState()
+    LaunchedEffect(requestedChat) {
+        val id = requestedChat ?: return@LaunchedEffect
+        openChat = id
+        onNavigate(Screen.Messages)
+        ChatAlert.requestedConversation.value = null
+    }
 
     Column(Modifier.fillMaxSize().background(NC.Background).statusBarsPadding().imePadding()) {
         AnimatedVisibility(
-            visible = !active.isSubScreen,
+            visible = !active.isSubScreen && !inChat,
             enter = expandVertically(tween(250)) + fadeIn(tween(250)),
             exit = shrinkVertically(tween(220)) + fadeOut(tween(150)),
         ) {
@@ -186,15 +202,25 @@ private fun MainShell(
                     Screen.Home -> HomeScreen(goTo = onNavigate)
                     Screen.Requests -> RequestsScreen()
                     Screen.Schedule -> ScheduleScreen()
-                    Screen.Messages -> MessagesScreen()
+                    Screen.Messages -> MessagesScreen(openChat = openChat, onOpenChat = { openChat = it })
                     Screen.More -> MoreScreen(goTo = onNavigate, onSignOut = onSignOut)
                     Screen.Wallet -> WalletScreen(back = { onNavigate(Screen.More) })
                     Screen.Profile -> ProfileScreen(back = { onNavigate(Screen.More) })
                     Screen.Documents -> DocumentsScreen(back = { onNavigate(Screen.More) })
+                    Screen.Reviews -> ReviewsScreen(back = { onNavigate(Screen.More) })
+                    Screen.Support -> SupportScreen(back = { onNavigate(Screen.More) })
                 }
             }
         }
-        if (!imeVisible) BottomNav(active, onNavigate)
+        if (!imeVisible) {
+            AnimatedVisibility(
+                visible = !inChat,
+                enter = expandVertically(tween(250)) + fadeIn(tween(250)),
+                exit = shrinkVertically(tween(220)) + fadeOut(tween(150)),
+            ) {
+                BottomNav(active, onNavigate)
+            }
+        }
     }
 }
 

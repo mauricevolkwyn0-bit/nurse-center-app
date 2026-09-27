@@ -22,13 +22,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -43,20 +44,25 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.EventAvailable
-import androidx.compose.material.icons.outlined.HeadsetMic
+import androidx.compose.material.icons.outlined.EventBusy
 import androidx.compose.material.icons.outlined.Phone
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,18 +72,35 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Text
+import android.widget.Toast
+import com.nursecenter.nurse.data.AuthException
+import com.nursecenter.nurse.data.AvailabilityRepository
+import com.nursecenter.nurse.data.BookingSummary
+import com.nursecenter.nurse.data.ChatAlert
+import com.nursecenter.nurse.data.ChatMessage
+import com.nursecenter.nurse.data.ChatRepository
+import com.nursecenter.nurse.data.ChatThread
+import com.nursecenter.nurse.data.RequestRealtime
+import com.nursecenter.nurse.data.ScheduleRepository
+import com.nursecenter.nurse.data.ScheduleWeek
+import com.nursecenter.nurse.data.Shift
+import com.nursecenter.nurse.data.WeeklyAvailability
 import com.nursecenter.nurse.ui.Eyebrow
 import com.nursecenter.nurse.ui.IconBtn
+import com.nursecenter.nurse.ui.NcSheet
 import com.nursecenter.nurse.ui.PageTitle
+import com.nursecenter.nurse.ui.PrimaryButton
 import com.nursecenter.nurse.ui.SectionTitle
 import com.nursecenter.nurse.ui.Txt
 import com.nursecenter.nurse.ui.enterUp
@@ -85,29 +108,56 @@ import com.nursecenter.nurse.ui.pressable
 import com.nursecenter.nurse.ui.rememberComingSoon
 import com.nursecenter.nurse.ui.theme.Jakarta
 import com.nursecenter.nurse.ui.theme.NC
+import kotlinx.coroutines.launch
+import java.time.DayOfWeek
+import java.time.Duration
+import java.time.LocalDate
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
+import java.util.Locale
 
-private data class Booking(val time: String, val title: String, val place: String, val teal: Boolean)
-
-private data class Day(val short: String, val long: String, val date: String)
-
-private val week = listOf(
-    Day("MON", "Monday", "23"), Day("TUE", "Tuesday", "24"), Day("WED", "Wednesday", "25"),
-    Day("THU", "Thursday", "26"), Day("FRI", "Friday", "27"), Day("SAT", "Saturday", "28"), Day("SUN", "Sunday", "29"),
-)
-
-private val bookings = mapOf(
-    "25" to listOf(
-        Booking("09:00", "Medication & wellness check", "Gardens · 2 hour shift", teal = true),
-        Booking("16:30", "Home-based care", "Observatory · 3 hour shift", teal = false),
-    ),
-    "27" to listOf(Booking("09:00", "Post-surgery check-in", "Claremont · 2 hour shift", teal = true)),
-)
+private val HourMinute = DateTimeFormatter.ofPattern("HH:mm")
 
 @Composable
 fun ScheduleScreen() {
-    var selected by rememberSaveable { mutableIntStateOf(2) }
-    val soon = rememberComingSoon()
-    val day = week[selected]
+    val today = LocalDate.now()
+    // Saved as epoch days so the chosen week and day survive rotation and tab switches.
+    var weekStartDay by rememberSaveable { mutableLongStateOf(today.with(DayOfWeek.MONDAY).toEpochDay()) }
+    var selectedDay by rememberSaveable { mutableLongStateOf(today.toEpochDay()) }
+    val weekStart = LocalDate.ofEpochDay(weekStartDay)
+    val days = (0L until 7L).map { weekStart.plusDays(it) }
+    val selected = LocalDate.ofEpochDay(selectedDay)
+
+    var data by remember { mutableStateOf<ScheduleWeek?>(null) }
+    var loadedWeek by remember { mutableStateOf<LocalDate?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var reload by remember { mutableIntStateOf(0) }
+    val changes by RequestRealtime.changes.collectAsState()
+    var availabilityOpen by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(weekStart, reload, changes) {
+        error = null
+        try {
+            data = ScheduleRepository.loadWeek(weekStart)
+            loadedWeek = weekStart
+        } catch (e: AuthException) {
+            error = e.message
+        } catch (e: Exception) {
+            error = "Couldn't load your calendar. Please try again."
+        }
+    }
+
+    fun moveWeek(weeks: Long) {
+        val start = weekStart.plusWeeks(weeks)
+        weekStartDay = start.toEpochDay()
+        // Keep the same weekday selected, or today when landing on the current week.
+        selectedDay = (if (!today.isBefore(start) && today.isBefore(start.plusDays(7))) today else selected.plusWeeks(weeks)).toEpochDay()
+    }
+
+    // Only trust bookings that belong to the week on screen, so switching weeks never flashes the old week's shifts.
+    val weekData = data?.takeIf { loadedWeek == weekStart }
+    val byDay = weekData?.bookings.orEmpty().groupBy { it.scheduledAt.toLocalDate() }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(top = 12.dp)
@@ -128,60 +178,232 @@ fun ScheduleScreen() {
                 .padding(16.dp)
         ) {
             Row(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                MonthArrow(Icons.AutoMirrored.Rounded.KeyboardArrowLeft) { if (selected > 0) selected-- }
-                Txt("September 2026", 15, Color(0xFF2B3E48), Modifier.weight(1f), weight = FontWeight.Bold, align = androidx.compose.ui.text.style.TextAlign.Center)
-                MonthArrow(Icons.AutoMirrored.Rounded.KeyboardArrowRight) { if (selected < week.lastIndex) selected++ }
+                MonthArrow(Icons.AutoMirrored.Rounded.KeyboardArrowLeft) { moveWeek(-1) }
+                Txt(weekLabel(days.first(), days.last()), 15, Color(0xFF2B3E48), Modifier.weight(1f), weight = FontWeight.Bold, align = TextAlign.Center)
+                MonthArrow(Icons.AutoMirrored.Rounded.KeyboardArrowRight) { moveWeek(1) }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                week.forEachIndexed { index, d ->
-                    DayChip(d, isSelected = index == selected, hasBookings = bookings.containsKey(d.date), Modifier.weight(1f)) {
-                        selected = index
-                    }
+                days.forEach { d ->
+                    DayChip(
+                        d, isSelected = d == selected, isToday = d == today, hasBookings = byDay.containsKey(d), Modifier.weight(1f),
+                    ) { selectedDay = d.toEpochDay() }
                 }
+            }
+            if (selected != today) {
+                Txt(
+                    "Back to today", 12, NC.TealText,
+                    Modifier.align(Alignment.CenterHorizontally).padding(top = 12.dp)
+                        .pressable(RoundedCornerShape(8.dp)) {
+                            weekStartDay = today.with(DayOfWeek.MONDAY).toEpochDay()
+                            selectedDay = today.toEpochDay()
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    weight = FontWeight.Bold,
+                )
             }
         }
 
         Column(Modifier.enterUp(2).padding(top = 28.dp, bottom = 32.dp)) {
-            SectionTitle("${day.long}, ${day.date} Sep", action = "Add availability", onAction = { soon("Adding availability") })
-            AnimatedContent(
-                targetState = day.date,
-                transitionSpec = {
-                    val forward = targetState > initialState
-                    (fadeIn(tween(250)) + slideInHorizontally(tween(300)) { if (forward) it / 6 else -it / 6 }) togetherWith
-                        (fadeOut(tween(150)) + slideOutHorizontally(tween(200)) { if (forward) -it / 8 else it / 8 })
-                },
-                label = "day",
-            ) { date ->
-                val items = bookings[date].orEmpty()
-                if (items.isEmpty()) {
-                    EmptyDay()
-                } else {
-                    Column(
-                        Modifier
-                            .padding(start = 8.dp)
-                            .drawBehind {
-                                drawLine(Color(0xFFDBE4E4), Offset(0f, 0f), Offset(0f, size.height), 1.dp.toPx())
-                            }
-                            .padding(start = 24.dp)
-                    ) {
-                        items.forEachIndexed { i, b -> TimelineItem(b, Modifier.enterUp(i)) }
+            SectionTitle(
+                selected.format(DateTimeFormatter.ofPattern("EEEE, d MMM", Locale.ENGLISH)),
+                action = "Add availability", onAction = { availabilityOpen = true },
+            )
+            when {
+                error != null && weekData == null -> ScheduleMessage(error!!, action = "Try again", onAction = { reload++ })
+                weekData == null -> Box(Modifier.fillMaxWidth().padding(vertical = 40.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = NC.Teal, strokeWidth = 3.dp, modifier = Modifier.size(28.dp))
+                }
+                else -> AnimatedContent(
+                    targetState = selected,
+                    transitionSpec = {
+                        val forward = targetState > initialState
+                        (fadeIn(tween(250)) + slideInHorizontally(tween(300)) { if (forward) it / 6 else -it / 6 }) togetherWith
+                            (fadeOut(tween(150)) + slideOutHorizontally(tween(200)) { if (forward) -it / 8 else it / 8 })
+                    },
+                    label = "day",
+                ) { date ->
+                    val items = byDay[date].orEmpty()
+                    if (items.isEmpty()) {
+                        EmptyDay()
+                    } else {
+                        Column(
+                            Modifier
+                                .padding(start = 8.dp)
+                                .drawBehind {
+                                    drawLine(Color(0xFFDBE4E4), Offset(0f, 0f), Offset(0f, size.height), 1.dp.toPx())
+                                }
+                                .padding(start = 24.dp)
+                        ) {
+                            items.forEachIndexed { i, b -> TimelineItem(b, Modifier.enterUp(i)) }
+                        }
                     }
                 }
             }
-            Row(
-                Modifier.padding(top = 8.dp).fillMaxWidth().background(Color(0xFFEEF8F6), RoundedCornerShape(16.dp)).padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Outlined.VerifiedUser, null, tint = Color(0xFF1C9891), modifier = Modifier.size(21.dp))
-                Spacer(Modifier.width(12.dp))
-                Text(
-                    buildAnnotatedString {
-                        withStyle(SpanStyle(color = Color(0xFF274B49), fontWeight = FontWeight.Bold)) { append("You are available\n") }
-                        append("Requests can arrive between 08:00 and 20:00.")
-                    },
-                    color = Color(0xFF58716F), fontSize = 12.sp, lineHeight = 17.sp,
-                )
+            weekData?.available?.let { AvailabilityNote(it) }
+        }
+    }
+    if (availabilityOpen) AvailabilitySheet(onDismiss = { availabilityOpen = false })
+}
+
+@Composable
+private fun AvailabilitySheet(onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    // null until the saved availability has loaded, so a late load can't overwrite the nurse's taps.
+    var days by remember { mutableStateOf<Set<DayOfWeek>?>(null) }
+    var shift by remember { mutableStateOf(Shift.FullDay) }
+    var saving by remember { mutableStateOf(false) }
+    var saved by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        val existing = runCatching { AvailabilityRepository.load() }.getOrNull()
+        shift = existing?.shift ?: Shift.FullDay
+        days = existing?.days ?: DayOfWeek.entries.filter { it <= DayOfWeek.FRIDAY }.toSet()
+    }
+
+    NcSheet(onDismiss) {
+        AnimatedContent(targetState = saved, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(120)) }, label = "availability") { done ->
+            if (done) {
+                Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 8.dp, bottom = 28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(Modifier.size(64.dp).background(Color(0xFFE7F7F2), CircleShape), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.EventAvailable, null, tint = Color(0xFF209A77), modifier = Modifier.size(28.dp))
+                    }
+                    Txt("Availability updated", 18, Color(0xFF263944), Modifier.padding(top = 16.dp), weight = FontWeight.Bold)
+                    Txt(
+                        "Your available days and preferred shift have been saved.", 12, Color(0xFF7F8E94),
+                        Modifier.padding(top = 8.dp), align = TextAlign.Center, lineHeight = 19,
+                    )
+                    PrimaryButton("Done", onDismiss, Modifier.padding(top = 24.dp).fillMaxWidth())
+                }
+            } else {
+                Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
+                    Eyebrow("Work preferences")
+                    Txt("Add availability", 21, Color(0xFF253844), Modifier.padding(top = 4.dp), weight = FontWeight.Bold)
+                    Txt("Choose when you are available to receive new bookings.", 12, Color(0xFF7D8C92), Modifier.padding(top = 8.dp), lineHeight = 18)
+                    val selected = days
+                    if (selected == null) {
+                        Box(Modifier.fillMaxWidth().padding(vertical = 48.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = NC.Teal, strokeWidth = 3.dp, modifier = Modifier.size(28.dp))
+                        }
+                    } else {
+                        Txt("Available days", 12, Color(0xFF53666F), Modifier.padding(top = 20.dp, bottom = 8.dp), weight = FontWeight.Bold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            DayOfWeek.entries.forEach { day ->
+                                val on = day in selected
+                                val bg by animateColorAsState(if (on) Color(0xFF1DA5A3) else Color(0xFFF0F4F3), label = "availDay")
+                                Txt(
+                                    day.getDisplayName(java.time.format.TextStyle.SHORT, Locale.ENGLISH), 10,
+                                    if (on) Color.White else Color(0xFF718188),
+                                    Modifier.weight(1f).pressable(RoundedCornerShape(12.dp), pressedScale = 0.92f) {
+                                        days = if (on) selected - day else selected + day
+                                    }.background(bg, RoundedCornerShape(12.dp)).padding(vertical = 12.dp),
+                                    weight = FontWeight.Bold, align = TextAlign.Center,
+                                )
+                            }
+                        }
+                        Txt("Preferred shift", 12, Color(0xFF53666F), Modifier.padding(top = 20.dp, bottom = 8.dp), weight = FontWeight.Bold)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Shift.entries.forEach { option -> ShiftOption(option, option == shift) { shift = option } }
+                        }
+                        PrimaryButton(
+                            "Save availability",
+                            onClick = {
+                                if (selected.isEmpty() || saving) return@PrimaryButton
+                                saving = true
+                                scope.launch {
+                                    try {
+                                        AvailabilityRepository.save(WeeklyAvailability(selected, shift))
+                                        saved = true
+                                    } catch (e: Exception) {
+                                        val reason = (e as? AuthException)?.message ?: "Couldn't save your availability. Please try again."
+                                        Toast.makeText(context, reason, Toast.LENGTH_SHORT).show()
+                                    } finally {
+                                        saving = false
+                                    }
+                                }
+                            },
+                            modifier = Modifier.padding(top = 20.dp).fillMaxWidth().graphicsLayer { alpha = if (selected.isEmpty()) 0.4f else 1f },
+                            loading = saving,
+                        )
+                    }
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun ShiftOption(shift: Shift, selected: Boolean, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    val border by animateColorAsState(if (selected) Color(0xFF4ABDB5) else Color(0xFFE3E9E9), label = "shiftBorder")
+    val bg by animateColorAsState(if (selected) Color(0xFFEEF9F7) else Color.White, label = "shiftBg")
+    Row(
+        Modifier.fillMaxWidth().pressable(shape, pressedScale = 0.98f, onClick = onClick).background(bg, shape).border(1.dp, border, shape).padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(20.dp)
+                .then(if (selected) Modifier.background(Color(0xFF1AA19D), CircleShape) else Modifier.border(1.dp, Color(0xFFC8D1D3), CircleShape)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (selected) Icon(Icons.Rounded.Check, null, tint = Color.White, modifier = Modifier.size(12.dp))
+        }
+        Txt(shift.label, 12, Color(0xFF344750), Modifier.weight(1f).padding(start = 12.dp), weight = FontWeight.Bold)
+        Txt(shift.hours, 11, Color(0xFF8B989D))
+    }
+}
+
+private fun weekLabel(first: LocalDate, last: LocalDate): String {
+    val month = DateTimeFormatter.ofPattern("MMMM", Locale.ENGLISH)
+    return when {
+        first.month == last.month -> first.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.ENGLISH))
+        first.year == last.year -> "${first.format(month)} – ${last.format(month)} ${last.year}"
+        else -> "${first.format(DateTimeFormatter.ofPattern("MMM yyyy", Locale.ENGLISH))} – " +
+            last.format(DateTimeFormatter.ofPattern("MMM yyyy", Locale.ENGLISH))
+    }
+}
+
+@Composable
+private fun AvailabilityNote(available: Boolean) {
+    Row(
+        Modifier.padding(top = 8.dp).fillMaxWidth()
+            .background(if (available) Color(0xFFEEF8F6) else Color(0xFFF3F5F5), RoundedCornerShape(16.dp)).padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (available) Icons.Outlined.VerifiedUser else Icons.Outlined.EventBusy, null,
+            tint = if (available) Color(0xFF1C9891) else Color(0xFF8B989E), modifier = Modifier.size(21.dp),
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = if (available) Color(0xFF274B49) else Color(0xFF3D4D55), fontWeight = FontWeight.Bold)) {
+                    append(if (available) "You are available\n" else "You are unavailable\n")
+                }
+                append(if (available) "New requests can reach you." else "You won't receive new requests until you're available again.")
+            },
+            color = Color(0xFF58716F), fontSize = 12.sp, lineHeight = 17.sp,
+        )
+    }
+}
+
+@Composable
+private fun ScheduleMessage(text: String, action: String? = null, onAction: () -> Unit = {}) {
+    val shape = RoundedCornerShape(19.dp)
+    Column(
+        Modifier.fillMaxWidth().padding(bottom = 16.dp).background(Color.White, shape).border(1.dp, Color(0xFFE2E9E9), shape)
+            .padding(20.dp)
+    ) {
+        Txt(text, 14, NC.Muted, weight = FontWeight.Medium, lineHeight = 20)
+        if (action != null) {
+            Txt(
+                action, 13, NC.TealText,
+                Modifier.padding(top = 10.dp).pressable(RoundedCornerShape(8.dp), onClick = onAction).padding(4.dp),
+                weight = FontWeight.Bold,
+            )
         }
     }
 }
@@ -194,9 +416,16 @@ private fun MonthArrow(icon: androidx.compose.ui.graphics.vector.ImageVector, on
 }
 
 @Composable
-private fun DayChip(day: Day, isSelected: Boolean, hasBookings: Boolean, modifier: Modifier, onClick: () -> Unit) {
+private fun DayChip(day: LocalDate, isSelected: Boolean, isToday: Boolean, hasBookings: Boolean, modifier: Modifier, onClick: () -> Unit) {
     val bg by animateColorAsState(if (isSelected) Color(0xFF1EAAA8) else Color.Transparent, tween(250), label = "dayBg")
-    val fg by animateColorAsState(if (isSelected) Color.White else Color(0xFF50636C), tween(250), label = "dayFg")
+    val fg by animateColorAsState(
+        when {
+            isSelected -> Color.White
+            isToday -> Color(0xFF1EAAA8)
+            else -> Color(0xFF50636C)
+        },
+        tween(250), label = "dayFg",
+    )
     val lift by animateFloatAsState(if (isSelected) 1f else 0f, spring(dampingRatio = 0.5f, stiffness = 500f), label = "dayLift")
     val shape = RoundedCornerShape(12.dp)
     Column(
@@ -208,8 +437,11 @@ private fun DayChip(day: Day, isSelected: Boolean, hasBookings: Boolean, modifie
             .padding(vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Txt(day.short, 9, if (isSelected) Color.White.copy(alpha = 0.7f) else Color(0xFFA2ADB1), weight = FontWeight.Bold)
-        Txt(day.date, 14, fg, Modifier.padding(top = 4.dp), weight = FontWeight.Bold)
+        Txt(
+            day.format(DateTimeFormatter.ofPattern("EEE", Locale.ENGLISH)).uppercase(Locale.ENGLISH), 9,
+            if (isSelected) Color.White.copy(alpha = 0.7f) else Color(0xFFA2ADB1), weight = FontWeight.Bold,
+        )
+        Txt(day.dayOfMonth.toString(), 14, fg, Modifier.padding(top = 4.dp), weight = FontWeight.Bold)
         Box(
             Modifier
                 .padding(top = 6.dp)
@@ -227,15 +459,28 @@ private fun DayChip(day: Day, isSelected: Boolean, hasBookings: Boolean, modifie
 }
 
 @Composable
-private fun TimelineItem(booking: Booking, modifier: Modifier = Modifier) {
+private fun TimelineItem(booking: BookingSummary, modifier: Modifier = Modifier) {
+    val start = booking.scheduledAt
+    val end = start.plusMinutes((booking.durationHours * 60).toLong())
+    val (statusLabel, dot) = when (booking.status) {
+        "in_progress" -> "IN PROGRESS" to NC.Coral
+        "completed" -> "COMPLETED" to Color(0xFFA4AFB3)
+        else -> null to Color(0xFF24AAA5)
+    }
+    val hours = booking.durationHours
+    val shift = if (hours % 1.0 == 0.0) "${hours.toInt()} hour shift" else String.format(Locale.US, "%.1f hour shift", hours)
     val shape = RoundedCornerShape(19.dp)
     Box(modifier.padding(bottom = 16.dp)) {
         Column(
             Modifier.fillMaxWidth().background(Color.White, shape).border(1.dp, Color(0xFFE2E9E9), shape).padding(16.dp)
         ) {
-            Txt(booking.time, 11, Color(0xFF8D9A9F), weight = FontWeight.Bold, spacing = 0.06f)
-            Txt(booking.title, 15, Color(0xFF293C47), Modifier.padding(top = 6.dp), weight = FontWeight.Bold)
-            Txt(booking.place, 12, Color(0xFF819096), Modifier.padding(top = 4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Txt("${start.format(HourMinute)} – ${end.format(HourMinute)}", 11, Color(0xFF8D9A9F), Modifier.weight(1f), weight = FontWeight.Bold, spacing = 0.06f)
+                statusLabel?.let { Txt(it, 10, dot, weight = FontWeight.Bold, spacing = 0.06f) }
+            }
+            Txt(booking.serviceName, 15, Color(0xFF293C47), Modifier.padding(top = 6.dp), weight = FontWeight.Bold)
+            booking.patientName?.let { Txt(it, 13, Color(0xFF5E7079), Modifier.padding(top = 2.dp), weight = FontWeight.Medium) }
+            Txt(listOfNotNull(booking.location, shift).joinToString(" · "), 12, Color(0xFF819096), Modifier.padding(top = 4.dp))
         }
         Box(
             Modifier
@@ -243,7 +488,7 @@ private fun TimelineItem(booking: Booking, modifier: Modifier = Modifier) {
                 .size(14.dp)
                 .background(NC.Background, CircleShape)
                 .padding(3.dp)
-                .background(if (booking.teal) Color(0xFF24AAA5) else NC.Coral, CircleShape)
+                .background(dot, CircleShape)
         )
     }
 }
@@ -262,17 +507,32 @@ private fun EmptyDay() {
     }
 }
 
-private data class Thread(val initials: String, val name: String, val preview: String, val time: String, val support: Boolean = false)
-
 @Composable
-fun MessagesScreen() {
-    var chatOpen by rememberSaveable { mutableStateOf(false) }
-    BackHandler(enabled = chatOpen) { chatOpen = false }
+fun MessagesScreen(openChat: String?, onOpenChat: (String?) -> Unit) {
+    BackHandler(enabled = openChat != null) { onOpenChat(null) }
+
+    var threads by remember { mutableStateOf<List<ChatThread>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var reload by remember { mutableIntStateOf(0) }
+
+    // Also reloads on leaving a chat, so its unread count clears.
+    LaunchedEffect(reload, openChat) {
+        error = null
+        try {
+            threads = ChatRepository.loadThreads()
+        } catch (e: AuthException) {
+            error = e.message
+        } catch (e: Exception) {
+            error = "Couldn't load your messages. Please try again."
+        }
+    }
+    // Keep previews and unread counts current as messages arrive.
+    LaunchedEffect(Unit) { RequestRealtime.messages.collect { reload++ } }
 
     AnimatedContent(
-        targetState = chatOpen,
+        targetState = openChat,
         transitionSpec = {
-            if (targetState) {
+            if (targetState != null) {
                 (slideInHorizontally(tween(300)) { it / 3 } + fadeIn(tween(250))) togetherWith fadeOut(tween(150))
             } else {
                 (slideInHorizontally(tween(300)) { -it / 4 } + fadeIn(tween(250))) togetherWith
@@ -280,14 +540,17 @@ fun MessagesScreen() {
             }
         },
         label = "chat",
-    ) { open ->
-        if (open) ChatView(onBack = { chatOpen = false }) else ThreadList(onOpen = { chatOpen = true })
+    ) { id ->
+        if (id != null) {
+            ChatView(id, threads?.find { it.id == id }, onBack = { onOpenChat(null) })
+        } else {
+            ThreadList(threads, error, onRetry = { reload++ }, onOpen = { onOpenChat(it) })
+        }
     }
 }
 
 @Composable
-private fun ThreadList(onOpen: () -> Unit) {
-    val soon = rememberComingSoon()
+private fun ThreadList(threads: List<ChatThread>?, error: String?, onRetry: () -> Unit, onOpen: (String) -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(top = 12.dp)) {
         Column(Modifier.enterUp(0)) {
             Eyebrow("Conversations")
@@ -300,64 +563,43 @@ private fun ThreadList(onOpen: () -> Unit) {
             lineHeight = 19,
         )
         Column(Modifier.padding(top = 12.dp, bottom = 24.dp)) {
-            val threads = listOf(
-                Thread("TM", "Thandi M.", "Perfect, please ring the blue gate...", "2 min"),
-                Thread("LS", "Lwazi S.", "Thank you for your help today.", "Yesterday"),
-                Thread("NC", "Nurse Center Support", "Your payment has been processed.", "Mon", support = true),
-            )
-            threads.forEachIndexed { index, t ->
-                ThreadRow(
-                    t, unread = if (index == 0) 2 else 0, online = index == 0,
-                    modifier = Modifier.enterUp(index + 2),
-                    onClick = if (index == 0) onOpen else { { soon("This conversation") } },
-                )
-                HorizontalDivider(color = Color(0xFFE7ECEC))
+            when {
+                threads == null && error != null -> ScheduleMessage(error, action = "Try again", onAction = onRetry)
+                threads == null -> Box(Modifier.fillMaxWidth().padding(vertical = 40.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = NC.Teal, strokeWidth = 3.dp, modifier = Modifier.size(28.dp))
+                }
+                threads.isEmpty() -> ScheduleMessage("No conversations yet. When a client messages you about a booking, it will appear here.")
+                else -> threads.forEachIndexed { index, t ->
+                    ThreadRow(t, Modifier.enterUp(index + 2)) { onOpen(t.id) }
+                    HorizontalDivider(color = Color(0xFFE7ECEC))
+                }
             }
         }
     }
 }
 
 @Composable
-private fun ThreadRow(t: Thread, unread: Int, online: Boolean, modifier: Modifier, onClick: () -> Unit) {
+private fun ThreadRow(t: ChatThread, modifier: Modifier, onClick: () -> Unit) {
     Row(
         modifier.fillMaxWidth().pressable(RoundedCornerShape(12.dp), pressedScale = 0.98f, onClick = onClick).padding(vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box {
-            Box(
-                Modifier.size(48.dp).background(
-                    when {
-                        t.support -> NC.DeepTeal
-                        online -> Color(0xFFDFF4F0)
-                        else -> Color(0xFFF8EAE8)
-                    },
-                    CircleShape,
-                ),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (t.support) {
-                    Icon(Icons.Outlined.HeadsetMic, null, tint = Color.White, modifier = Modifier.size(21.dp))
-                } else {
-                    Txt(t.initials, 14, if (online) Color(0xFF168D89) else Color(0xFFB36E68), weight = FontWeight.Bold)
-                }
-            }
-            if (online) {
-                Box(
-                    Modifier.align(Alignment.BottomEnd).size(14.dp).background(NC.Background, CircleShape).padding(2.dp)
-                        .background(Color(0xFF36BD84), CircleShape)
-                )
-            }
+        Box(Modifier.size(48.dp).background(Color(0xFFDFF4F0), CircleShape), contentAlignment = Alignment.Center) {
+            Txt(initials(t.clientName), 14, Color(0xFF168D89), weight = FontWeight.Bold)
         }
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
             Row {
-                Txt(t.name, 15, Color(0xFF283B46), Modifier.weight(1f), weight = FontWeight.Bold)
-                Txt(t.time, 11, Color(0xFF8A989E), weight = FontWeight.SemiBold)
+                Txt(t.clientName, 15, Color(0xFF283B46), Modifier.weight(1f), weight = FontWeight.Bold, maxLines = 1)
+                Txt(shortTime(t.lastAt), 11, Color(0xFF8A989E), weight = FontWeight.SemiBold)
             }
-            Txt(t.preview, 12, Color(0xFF71838B), Modifier.padding(top = 4.dp), maxLines = 1)
-        }
-        if (unread > 0) {
             Txt(
-                unread.toString(), 11, Color.White,
+                t.lastMessage ?: "No messages yet", 12, if (t.unread > 0) Color(0xFF3E525B) else Color(0xFF71838B),
+                Modifier.padding(top = 4.dp), weight = if (t.unread > 0) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1,
+            )
+        }
+        if (t.unread > 0) {
+            Txt(
+                t.unread.toString(), 11, Color.White,
                 Modifier.background(Color(0xFFEF9D96), CircleShape).padding(horizontal = 7.dp, vertical = 2.dp),
                 weight = FontWeight.Bold,
             )
@@ -365,34 +607,86 @@ private fun ThreadRow(t: Thread, unread: Int, online: Boolean, modifier: Modifie
     }
 }
 
-private data class Message(val text: String, val mine: Boolean)
+private sealed interface ChatRow {
+    data class Day(val date: LocalDate) : ChatRow
+    data class Msg(val message: ChatMessage) : ChatRow
+}
 
-private val messageListSaver = listSaver<MutableList<String>, String>(
-    save = { it.toList() },
-    restore = { mutableStateListOf(*it.toTypedArray()) },
-)
+/** Interleaves a date header before each day's first message. */
+private fun chatRows(messages: List<ChatMessage>): List<ChatRow> = buildList {
+    var day: LocalDate? = null
+    messages.forEach { m ->
+        val date = m.createdAt.toLocalDate()
+        if (date != day) add(ChatRow.Day(date)).also { day = date }
+        add(ChatRow.Msg(m))
+    }
+}
 
 @Composable
-private fun ChatView(onBack: () -> Unit) {
-    val sent = rememberSaveable(saver = messageListSaver) { mutableStateListOf<String>() }
-    var draft by rememberSaveable { mutableStateOf("") }
+private fun ChatView(conversationId: String, thread: ChatThread?, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val soon = rememberComingSoon()
     val listState = rememberLazyListState()
+    var messages by remember(conversationId) { mutableStateOf<List<ChatMessage>?>(null) }
+    var error by remember(conversationId) { mutableStateOf<String?>(null) }
+    var reload by remember { mutableIntStateOf(0) }
+    var draft by rememberSaveable { mutableStateOf("") }
+    var sending by remember { mutableStateOf(false) }
 
-    val messages = listOf(
-        Message("Hello Maurice, thank you for accepting my request.", mine = false),
-        Message("Hi Thandi. You're welcome. I'll be there at 16:30.", mine = true),
-        Message("Perfect, please ring the blue gate when you arrive.", mine = false),
-    ) + sent.map { Message(it, mine = true) }
-
-    LaunchedEffect(messages.size) { listState.animateScrollToItem(messages.size) }
-
-    val send = {
-        val text = draft.trim()
-        if (text.isNotEmpty()) sent.add(text)
-        draft = ""
+    // No notifications for this conversation while it's on screen; clear any already showing.
+    DisposableEffect(conversationId) {
+        ChatAlert.openConversation = conversationId
+        ChatAlert.clear(context, conversationId)
+        onDispose { if (ChatAlert.openConversation == conversationId) ChatAlert.openConversation = null }
     }
 
+    LaunchedEffect(conversationId, reload) {
+        error = null
+        try {
+            messages = ChatRepository.loadMessages(conversationId)
+            ChatRepository.markRead(conversationId)
+        } catch (e: AuthException) {
+            error = e.message
+        } catch (e: Exception) {
+            error = "Couldn't load this conversation. Please try again."
+        }
+    }
+    LaunchedEffect(conversationId) {
+        RequestRealtime.messages.collect { m ->
+            if (m.conversationId != conversationId) return@collect
+            val current = messages ?: return@collect
+            if (current.none { it.id == m.id }) messages = current + m
+            if (!m.mine) ChatRepository.markRead(conversationId)
+        }
+    }
+
+    val rows = remember(messages) { chatRows(messages.orEmpty()) }
+    LaunchedEffect(rows.size) { if (rows.isNotEmpty()) listState.animateScrollToItem(rows.lastIndex) }
+
+    val send = send@{
+        val text = draft.trim()
+        if (text.isEmpty() || sending) return@send
+        sending = true
+        draft = ""
+        scope.launch {
+            try {
+                val sent = ChatRepository.send(conversationId, text)
+                // The realtime echo may already have added it.
+                val current = messages.orEmpty()
+                if (current.none { it.id == sent.id }) messages = current + sent
+            } catch (e: Exception) {
+                draft = text
+                val reason = (e as? AuthException)?.message ?: "Couldn't send your message. Please try again."
+                Toast.makeText(context, reason, Toast.LENGTH_SHORT).show()
+            } finally {
+                sending = false
+            }
+        }
+        Unit
+    }
+
+    val name = thread?.clientName ?: "Client"
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
@@ -401,30 +695,49 @@ private fun ChatView(onBack: () -> Unit) {
             IconBtn(Icons.AutoMirrored.Rounded.ArrowBack, "Back", onBack)
             Spacer(Modifier.width(12.dp))
             Box(Modifier.size(40.dp).background(Color(0xFFE5F6F3), CircleShape), contentAlignment = Alignment.Center) {
-                Txt("TM", 14, Color(0xFF168C89), weight = FontWeight.Bold)
+                Txt(initials(name), 14, Color(0xFF168C89), weight = FontWeight.Bold)
             }
             Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                Txt("Thandi M.", 15, Color(0xFF293C47), weight = FontWeight.Bold)
-                Txt("Online now", 11, Color(0xFF2AA878), weight = FontWeight.SemiBold)
+                Txt(name, 15, Color(0xFF293C47), weight = FontWeight.Bold, maxLines = 1)
+                Txt("Nurse Center client", 11, Color(0xFF8A989E), weight = FontWeight.SemiBold)
             }
             IconBtn(Icons.Outlined.Phone, "Call", { soon("Calling") })
         }
         HorizontalDivider(color = Color(0xFFE6ECEC))
 
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item {
-                Txt(
-                    "TODAY", 11, Color(0xFFA0AAAE), Modifier.fillParentMaxWidth(),
-                    weight = FontWeight.SemiBold, spacing = 0.08f, align = androidx.compose.ui.text.style.TextAlign.Center,
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            when {
+                messages == null && error != null -> Box(Modifier.padding(20.dp)) {
+                    ScheduleMessage(error!!, action = "Try again", onAction = { reload++ })
+                }
+                messages == null -> CircularProgressIndicator(
+                    color = NC.Teal, strokeWidth = 3.dp, modifier = Modifier.align(Alignment.Center).size(28.dp),
                 )
-            }
-            itemsIndexed(messages, key = { index, _ -> index }) { _, message ->
-                Bubble(message, Modifier.animateItem())
+                rows.isEmpty() -> Txt(
+                    "No messages yet. Say hello to $name.", 13, Color(0xFF8A989E),
+                    Modifier.align(Alignment.Center).padding(24.dp), align = TextAlign.Center,
+                )
+                else -> LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(rows, key = { row ->
+                        when (row) {
+                            is ChatRow.Day -> "day-${row.date}"
+                            is ChatRow.Msg -> row.message.id
+                        }
+                    }) { row ->
+                        when (row) {
+                            is ChatRow.Day -> Txt(
+                                dayLabel(row.date), 11, Color(0xFFA0AAAE), Modifier.fillParentMaxWidth().padding(vertical = 4.dp),
+                                weight = FontWeight.SemiBold, spacing = 0.08f, align = TextAlign.Center,
+                            )
+                            is ChatRow.Msg -> Bubble(row.message, Modifier.animateItem())
+                        }
+                    }
+                }
             }
         }
 
@@ -433,6 +746,7 @@ private fun ChatView(onBack: () -> Unit) {
                 .fillMaxWidth()
                 .background(Color.White)
                 .drawBehind { drawLine(Color(0xFFE3EAEA), Offset.Zero, Offset(size.width, 0f), 1.dp.toPx()) }
+                .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -458,26 +772,30 @@ private fun ChatView(onBack: () -> Unit) {
                 },
             )
             Spacer(Modifier.width(8.dp))
-            val active = draft.isNotBlank()
+            val active = draft.isNotBlank() && !sending && messages != null
             val sendBg by animateColorAsState(if (active) Color(0xFF1DA5A3) else Color(0xFFB9DEDC), label = "sendBg")
             Box(
-                Modifier.size(44.dp).pressable(CircleShape, pressedScale = 0.88f, onClick = send).background(sendBg, CircleShape),
+                Modifier.size(44.dp).pressable(CircleShape, pressedScale = 0.88f, onClick = { if (active) send() }).background(sendBg, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.AutoMirrored.Rounded.Send, "Send", tint = Color.White, modifier = Modifier.size(19.dp))
+                if (sending) {
+                    CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                } else {
+                    Icon(Icons.AutoMirrored.Rounded.Send, "Send", tint = Color.White, modifier = Modifier.size(19.dp))
+                }
             }
         }
     }
 }
 
 @Composable
-private fun Bubble(message: Message, modifier: Modifier = Modifier) {
+private fun Bubble(message: ChatMessage, modifier: Modifier = Modifier) {
     val shape = if (message.mine) {
         RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 6.dp)
     } else {
         RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 6.dp, bottomEnd = 18.dp)
     }
-    Box(modifier.fillMaxWidth(), contentAlignment = if (message.mine) Alignment.CenterEnd else Alignment.CenterStart) {
+    Column(modifier.fillMaxWidth(), horizontalAlignment = if (message.mine) Alignment.End else Alignment.Start) {
         Txt(
             message.text, 13, if (message.mine) Color.White else Color(0xFF425660),
             Modifier
@@ -487,6 +805,34 @@ private fun Bubble(message: Message, modifier: Modifier = Modifier) {
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             lineHeight = 20,
         )
+        Txt(message.createdAt.format(HourMinute), 10, Color(0xFFA0AAAE), Modifier.padding(top = 4.dp, start = 6.dp, end = 6.dp))
     }
 }
 
+private fun initials(name: String): String =
+    name.split(' ').filter { it.isNotBlank() }.take(2).joinToString("") { it.first().uppercase() }.ifEmpty { "?" }
+
+/** Compact time for the conversation list: "Now", "5 min", "14:30", "Yesterday", "Mon" or "3 Sep". */
+private fun shortTime(time: ZonedDateTime?): String {
+    if (time == null) return ""
+    val now = ZonedDateTime.now(time.zone)
+    val minutes = Duration.between(time, now).toMinutes()
+    val days = ChronoUnit.DAYS.between(time.toLocalDate(), now.toLocalDate())
+    return when {
+        minutes < 1 -> "Now"
+        minutes < 60 -> "$minutes min"
+        days == 0L -> time.format(HourMinute)
+        days == 1L -> "Yesterday"
+        days < 7 -> time.format(DateTimeFormatter.ofPattern("EEE", Locale.ENGLISH))
+        else -> time.format(DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH))
+    }
+}
+
+private fun dayLabel(date: LocalDate): String {
+    val today = LocalDate.now()
+    return when (date) {
+        today -> "TODAY"
+        today.minusDays(1) -> "YESTERDAY"
+        else -> date.format(DateTimeFormatter.ofPattern("EEE, d MMM", Locale.ENGLISH)).uppercase(Locale.ENGLISH)
+    }
+}

@@ -14,19 +14,26 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -257,5 +264,29 @@ fun CardList(rows: List<@Composable () -> Unit>, modifier: Modifier = Modifier) 
 fun IconTile(icon: ImageVector, background: Color, tint: Color, size: Dp = 40.dp, iconSize: Dp = 19.dp, corner: Dp = 12.dp) {
     Box(Modifier.size(size).background(background, RoundedCornerShape(corner)), contentAlignment = Alignment.Center) {
         Icon(icon, null, tint = tint, modifier = Modifier.size(iconSize))
+    }
+}
+
+/** Bottom sheet styled like the design's modal: white, rounded top, a round close button top right. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun NcSheet(onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = Color.White,
+        dragHandle = null,
+    ) {
+        Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
+            Box(
+                Modifier.align(Alignment.End).padding(top = 16.dp, end = 16.dp).size(32.dp)
+                    .pressable(CircleShape, pressedScale = 0.9f, onClick = onDismiss).background(Color(0xFFF0F4F3), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Rounded.Close, "Close", tint = Color(0xFF718087), modifier = Modifier.size(16.dp))
+            }
+            content()
+        }
     }
 }

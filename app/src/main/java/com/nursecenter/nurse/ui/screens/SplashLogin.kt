@@ -70,6 +70,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -257,10 +258,12 @@ fun LoginScreen(onLogin: () -> Unit) {
                 .verticalScroll(rememberScrollState())
         ) {
             Column(Modifier.heightIn(min = screenHeight)) {
+                // The hero takes any spare height so the form below stays compact on tall screens.
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .height(heroHeight + statusBar)
+                        .weight(1f)
+                        .heightIn(min = heroHeight + statusBar)
                         .background(
                             Brush.linearGradient(listOf(Color(0xFF163E48), Color(0xFF167A76)), Offset.Zero, Offset.Infinite)
                         )
@@ -273,25 +276,30 @@ fun LoginScreen(onLogin: () -> Unit) {
                         Modifier.align(Alignment.BottomEnd).offset(x = 80.dp, y = 75.dp).size(190.dp)
                             .border(1.dp, Color.White.copy(alpha = 0.11f), CircleShape)
                     )
-                    Column(Modifier.statusBarsPadding().padding(start = 28.dp, end = 28.dp, top = 28.dp)) {
+                    // Centred in the visible hero: below the status bar and above the form's 20dp overlap.
+                    Column(
+                        Modifier.align(Alignment.Center).statusBarsPadding()
+                            .padding(start = 28.dp, end = 28.dp, top = 24.dp, bottom = 44.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
                         Image(
                             painterResource(R.drawable.logo_icon), null,
                             Modifier
                                 .enterUp(0)
-                                .size(56.dp)
-                                .shadow(8.dp, RoundedCornerShape(16.dp))
-                                .background(Color.White.copy(alpha = 0.95f), RoundedCornerShape(16.dp))
-                                .padding(6.dp),
+                                .size(64.dp)
+                                .shadow(8.dp, RoundedCornerShape(18.dp))
+                                .background(Color.White.copy(alpha = 0.95f), RoundedCornerShape(18.dp))
+                                .padding(7.dp),
                         )
                         Spacer(Modifier.height(26.dp))
-                        Column(Modifier.enterUp(1)) {
+                        Column(Modifier.enterUp(1), horizontalAlignment = Alignment.CenterHorizontally) {
                             Txt("NURSE PORTAL", 12, Color.White.copy(alpha = 0.65f), weight = FontWeight.Bold, spacing = 0.18f)
                             Spacer(Modifier.height(8.dp))
                             Txt("Welcome back.", 31, Color.White, weight = FontWeight.Bold, spacing = -0.03f)
                             Spacer(Modifier.height(8.dp))
                             Txt(
                                 "Your bookings, clients and earnings, all in one place.", 14,
-                                Color.White.copy(alpha = 0.75f), Modifier.widthIn(max = 300.dp), lineHeight = 22,
+                                Color.White.copy(alpha = 0.75f), Modifier.widthIn(max = 300.dp), lineHeight = 22, align = TextAlign.Center,
                             )
                         }
                     }
@@ -299,10 +307,9 @@ fun LoginScreen(onLogin: () -> Unit) {
 
                 Column(
                     Modifier
-                        .weight(1f)
                         .offset(y = (-20).dp)
                         .background(NC.LoginBackground, RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-                        .padding(start = 24.dp, end = 24.dp, top = 32.dp, bottom = 28.dp)
+                        .padding(start = 24.dp, end = 24.dp, top = 32.dp)
                         .navigationBarsPadding()
                 ) {
                     Column(Modifier.enterUp(2)) {
@@ -311,6 +318,7 @@ fun LoginScreen(onLogin: () -> Unit) {
                             value = email,
                             onValueChange = { email = it; error = null },
                             icon = Icons.Outlined.Person,
+                            placeholder = "Enter your email address",
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
                         )
                     }
@@ -321,6 +329,7 @@ fun LoginScreen(onLogin: () -> Unit) {
                             value = password,
                             onValueChange = { password = it; error = null },
                             icon = Icons.Outlined.Lock,
+                            placeholder = "Enter your password",
                             visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Go),
                             keyboardActions = KeyboardActions(onGo = { signIn() }),
@@ -349,7 +358,7 @@ fun LoginScreen(onLogin: () -> Unit) {
                         trailing = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                         loading = signingIn,
                     )
-                    Spacer(Modifier.weight(1f).heightIn(min = 32.dp))
+                    Spacer(Modifier.height(24.dp))
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.Center,
@@ -377,6 +386,7 @@ private fun LoginField(
     visualTransformation: VisualTransformation = VisualTransformation.None,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     keyboardActions: KeyboardActions = KeyboardActions.Default,
+    placeholder: String? = null,
     trailing: (@Composable () -> Unit)? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -406,7 +416,10 @@ private fun LoginField(
             ) {
                 Icon(icon, null, tint = iconTint, modifier = Modifier.size(19.dp))
                 Spacer(Modifier.width(11.dp))
-                Box(Modifier.weight(1f)) { inner() }
+                Box(Modifier.weight(1f)) {
+                    if (value.isEmpty() && placeholder != null) Txt(placeholder, 14, Color(0xFFA3B0B5), weight = FontWeight.Medium, maxLines = 1)
+                    inner()
+                }
                 trailing?.invoke()
             }
         },

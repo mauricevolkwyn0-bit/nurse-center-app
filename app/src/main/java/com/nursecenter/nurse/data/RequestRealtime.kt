@@ -13,7 +13,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -29,17 +31,23 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Listens to Supabase Realtime for new client requests addressed to the signed-in nurse:
- * pending `bookings` assigned to them and `job_alerts` rows sent to them.
+ * Listens to Supabase Realtime for new client requests addressed to the signed-in nurse
+ * (pending `bookings` assigned to them and `job_alerts` rows sent to them) and for chat `messages`.
  */
 object RequestRealtime {
     private const val TAG = "RequestRealtime"
     private const val BOOKINGS_TOPIC = "realtime:nurse-bookings"
     private const val ALERTS_TOPIC = "realtime:nurse-job-alerts"
+    private const val MESSAGES_TOPIC = "realtime:nurse-messages"
+    private val TOPICS = listOf(BOOKINGS_TOPIC, ALERTS_TOPIC, MESSAGES_TOPIC)
 
     private val _changes = MutableStateFlow(0)
     /** Increments whenever a request arrives or is closed (cancelled, declined, taken); screens observe it to refresh. */
     val changes: StateFlow<Int> = _changes
+
+    private val _messages = MutableSharedFlow<ChatMessage>(extraBufferCapacity = 64)
+    /** Chat messages as they arrive in any of the nurse's conversations, including their own. */
+    val messages: SharedFlow<ChatMessage> = _messages
 
     private val client = OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build()
     private val ref = AtomicInteger(0)
@@ -59,6 +67,7 @@ object RequestRealtime {
         scope = null
         synchronized(alerted) { alerted.clear() }
         synchronized(closed) { closed.clear() }
+        ChatAlert.reset()
     }
 
     private suspend fun CoroutineScope.connectLoop(context: Context) {
@@ -67,7 +76,7 @@ object RequestRealtime {
             val session = runCatching { SupabaseAuth.validSession() }.getOrNull()
             if (session != null) {
                 val closed = CompletableDeferred<Unit>()
-                val listener = Listener(context, session.userId, closed) { backoff = 1_000L }
+                val listener = Listener(context, this, session.userId, closed) { backoff = 1_000L }
                 val url = BuildConfig.SUPABASE_URL.trimEnd('/').replaceFirst("http", "ws") +
                     "/realtime/v1/websocket?apikey=${BuildConfig.SUPABASE_ANON_KEY}&vsn=1.0.0"
                 val socket = client.newWebSocket(Request.Builder().url(url).build(), listener)
@@ -93,7 +102,7 @@ object RequestRealtime {
             val fresh = runCatching { SupabaseAuth.validSession().accessToken }.getOrNull() ?: continue
             if (fresh != token) {
                 token = fresh
-                for (topic in listOf(BOOKINGS_TOPIC, ALERTS_TOPIC)) {
+                for (topic in TOPICS) {
                     socket.send(message(topic, "access_token", JSONObject().put("access_token", fresh)))
                 }
             }
@@ -106,7 +115,8 @@ object RequestRealtime {
             .put("ref", r).put("join_ref", r).toString()
     }
 
-    private fun joinPayload(table: String, events: List<String>, userId: String, token: String) = JSONObject()
+    /** @param filter a Realtime row filter, or null to rely on the table's RLS policy alone. */
+    private fun joinPayload(table: String, events: List<String>, filter: String?, token: String) = JSONObject()
         .put(
             "config", JSONObject()
                 .put("broadcast", JSONObject().put("self", false))
@@ -116,7 +126,7 @@ object RequestRealtime {
                         events.forEach { event ->
                             put(
                                 JSONObject().put("event", event).put("schema", "public").put("table", table)
-                                    .put("filter", "caregiver_id=eq.$userId")
+                                    .apply { if (filter != null) put("filter", filter) }
                             )
                         }
                     }
@@ -155,6 +165,7 @@ object RequestRealtime {
 
     private class Listener(
         private val context: Context,
+        private val scope: CoroutineScope,
         private val userId: String,
         private val closed: CompletableDeferred<Unit>,
         private val onConnected: () -> Unit,
@@ -162,9 +173,12 @@ object RequestRealtime {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             val token = SupabaseAuth.session?.accessToken ?: return run { webSocket.close(1000, null) }
             // Separate channels so one table missing from the realtime publication can't break the other.
-            webSocket.send(message(BOOKINGS_TOPIC, "phx_join", joinPayload("bookings", listOf("*"), userId, token)))
+            val mine = "caregiver_id=eq.$userId"
+            webSocket.send(message(BOOKINGS_TOPIC, "phx_join", joinPayload("bookings", listOf("*"), mine, token)))
             // UPDATEs arrive when the booking behind an alert is cancelled or taken (see migration 022).
-            webSocket.send(message(ALERTS_TOPIC, "phx_join", joinPayload("job_alerts", listOf("INSERT", "UPDATE"), userId, token)))
+            webSocket.send(message(ALERTS_TOPIC, "phx_join", joinPayload("job_alerts", listOf("INSERT", "UPDATE"), mine, token)))
+            // messages has no caregiver column; its RLS policy limits delivery to the nurse's own conversations.
+            webSocket.send(message(MESSAGES_TOPIC, "phx_join", joinPayload("messages", listOf("INSERT"), null, token)))
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -211,6 +225,13 @@ object RequestRealtime {
                                 else -> null
                             },
                         )
+                    }
+                }
+                "messages" -> if (type == "INSERT" && record.isNull("deleted_at")) {
+                    val message = runCatching { ChatRepository.toMessage(record, userId) }.getOrNull() ?: return
+                    _messages.tryEmit(message)
+                    if (!message.mine) scope.launch {
+                        ChatAlert.onIncoming(context, message, ChatRepository.senderName(message.senderId))
                     }
                 }
             }

@@ -1,5 +1,11 @@
 package com.nursecenter.nurse.ui.screens
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -38,7 +44,12 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.AccountBalanceWallet
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Inbox
+import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.LocalHospital
 import androidx.compose.material.icons.outlined.LocationOn
+import androidx.compose.material.icons.outlined.MedicalServices
+import androidx.compose.material.icons.outlined.MonitorHeart
+import androidx.compose.material.icons.outlined.Phone
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.rounded.Check
@@ -65,13 +76,16 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.nursecenter.nurse.data.AuthException
 import com.nursecenter.nurse.data.BookingSummary
 import com.nursecenter.nurse.data.HomeData
 import com.nursecenter.nurse.data.HomeRepository
+import com.nursecenter.nurse.data.PanicRepository
 import com.nursecenter.nurse.data.RESPONSE_WINDOW
 import com.nursecenter.nurse.data.RequestsData
 import com.nursecenter.nurse.data.RequestsRepository
@@ -79,6 +93,7 @@ import com.nursecenter.nurse.data.RequestRealtime
 import com.nursecenter.nurse.ui.CardList
 import com.nursecenter.nurse.ui.Eyebrow
 import com.nursecenter.nurse.ui.IconTile
+import com.nursecenter.nurse.ui.NcSheet
 import com.nursecenter.nurse.ui.PageTitle
 import com.nursecenter.nurse.ui.PrimaryButton
 import com.nursecenter.nurse.ui.SecondaryButton
@@ -154,6 +169,176 @@ fun HomeScreen(goTo: (Screen) -> Unit) {
             }
             else -> HomeContent(loaded, goTo, onRequestExpired = { reload++ })
         }
+        // Always shown, even if the dashboard fails to load.
+        var sosOpen by rememberSaveable { mutableStateOf(false) }
+        SosCard(
+            Modifier.padding(horizontal = 20.dp).padding(top = if (loaded == null) 24.dp else 0.dp, bottom = 28.dp).enterUp(4),
+        ) { sosOpen = true }
+        if (sosOpen) SosSheet(onDismiss = { sosOpen = false })
+    }
+}
+
+@Composable
+private fun SosCard(modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(20.dp)
+    Row(
+        modifier
+            .fillMaxWidth()
+            .shadow(8.dp, shape, ambientColor = Color(0x14D74A41), spotColor = Color(0x1FD74A41))
+            .pressable(shape, onClick = onClick)
+            .background(Color(0xFFFFF0EF), shape)
+            .border(1.dp, Color(0xFFF1B2AD), shape)
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconTile(Icons.Outlined.MonitorHeart, Color(0xFFE85049), Color.White, size = 44.dp, iconSize = 22.dp, corner = 16.dp)
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Txt("Panic / SOS", 14, Color(0xFFB83E38), weight = FontWeight.Bold)
+            Txt("Get emergency help immediately", 11, Color(0xFFA86A66), Modifier.padding(top = 4.dp))
+        }
+        Txt(
+            "SOS", 11, Color.White,
+            Modifier.background(Color(0xFFE85049), RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+            weight = FontWeight.ExtraBold,
+        )
+    }
+}
+
+/** South Africa's national ambulance number. */
+private const val AMBULANCE_NUMBER = "10177"
+
+private enum class Emergency(val title: String, val subtitle: String, val icon: ImageVector, val urgent: Boolean = false) {
+    Ambulance("Ambulance", "Call $AMBULANCE_NUMBER and alert Nurse Center support", Icons.Outlined.LocalHospital, urgent = true),
+    Doctor("Doctor", "Alert Nurse Center support to arrange a doctor", Icons.Outlined.MedicalServices),
+    Contact("Client's emergency contact", "Alert Nurse Center support to reach them", Icons.Outlined.Groups),
+}
+
+private sealed interface SosState {
+    data object Choosing : SosState
+    data class Sending(val need: Emergency) : SosState
+    data class Sent(val need: Emergency, val withLocation: Boolean) : SosState
+    data class Failed(val need: Emergency, val message: String) : SosState
+}
+
+@Composable
+private fun SosSheet(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    // Not tied to the sheet, so an alert keeps sending if the sheet is closed.
+    val scope = rememberCoroutineScope()
+    var state by remember { mutableStateOf<SosState>(SosState.Choosing) }
+
+    fun dialAmbulance() {
+        runCatching { context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$AMBULANCE_NUMBER"))) }
+    }
+
+    fun send(need: Emergency) {
+        state = SosState.Sending(need)
+        if (need == Emergency.Ambulance) dialAmbulance()
+        scope.launch {
+            state = try {
+                SosState.Sent(need, PanicRepository.send(context))
+            } catch (e: Exception) {
+                SosState.Failed(need, (e as? AuthException)?.message ?: "Couldn't send your alert.")
+            }
+        }
+    }
+
+    // Location is optional: the alert is sent whether or not the nurse allows it.
+    var pending by remember { mutableStateOf<Emergency?>(null) }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        pending?.let(::send)
+        pending = null
+    }
+    fun choose(need: Emergency) {
+        val granted = listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+            .any { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED }
+        if (granted) {
+            send(need)
+        } else {
+            pending = need
+            permission.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+        }
+    }
+
+    NcSheet(onDismiss) {
+        AnimatedContent(targetState = state, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(120)) }, label = "sos") { s ->
+            when (s) {
+                SosState.Choosing -> Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
+                    Txt("EMERGENCY ASSISTANCE", 11, Color(0xFFD44F48), weight = FontWeight.ExtraBold, spacing = 0.14f)
+                    Txt("Who do you need?", 21, Color(0xFF243743), Modifier.padding(top = 4.dp), weight = FontWeight.Bold)
+                    Txt(
+                        "Nurse Center support will be alerted straight away with your current location.", 12, Color(0xFF7C8B91),
+                        Modifier.padding(top = 8.dp, bottom = 20.dp), lineHeight = 18,
+                    )
+                    Emergency.entries.forEach { EmergencyOption(it) { choose(it) } }
+                    SecondaryButton("Cancel", Icons.Rounded.Close, onDismiss, Modifier.padding(top = 6.dp).fillMaxWidth())
+                }
+                is SosState.Sending -> Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 8.dp, bottom = 40.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    CircularProgressIndicator(color = Color(0xFFE85049), strokeWidth = 3.dp, modifier = Modifier.size(40.dp))
+                    Txt("Sending your alert…", 18, Color(0xFF243743), Modifier.padding(top = 20.dp), weight = FontWeight.Bold)
+                    Txt("Getting your location and notifying Nurse Center support.", 12, Color(0xFF74858C), Modifier.padding(top = 8.dp), align = TextAlign.Center, lineHeight = 18)
+                }
+                is SosState.Sent -> Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 8.dp, bottom = 28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(Modifier.size(64.dp).background(Color(0xFFE8F7F2), CircleShape), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.Check, null, tint = Color(0xFF1C9B76), modifier = Modifier.size(28.dp))
+                    }
+                    Txt("Help request sent", 18, Color(0xFF243743), Modifier.padding(top = 16.dp), weight = FontWeight.Bold)
+                    val alerted = "Nurse Center support has been alerted" + (if (s.withLocation) " with your location" else "") +
+                        " and will contact you right away."
+                    val text = if (s.need == Emergency.Ambulance) {
+                        "$alerted Your phone app has been opened with $AMBULANCE_NUMBER — press call if you haven't yet."
+                    } else alerted
+                    Txt(text, 12, Color(0xFF74858C), Modifier.padding(top = 8.dp), align = TextAlign.Center, lineHeight = 19)
+                    PrimaryButton("Done", onDismiss, Modifier.padding(top = 24.dp).fillMaxWidth())
+                    if (s.need == Emergency.Ambulance) {
+                        SecondaryButton("Call $AMBULANCE_NUMBER again", Icons.Outlined.Phone, ::dialAmbulance, Modifier.padding(top = 10.dp).fillMaxWidth())
+                    }
+                }
+                is SosState.Failed -> Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 8.dp, bottom = 28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(Modifier.size(64.dp).background(Color(0xFFFFF0EF), CircleShape), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.Close, null, tint = Color(0xFFDC554D), modifier = Modifier.size(28.dp))
+                    }
+                    Txt("Alert not sent", 18, Color(0xFF243743), Modifier.padding(top = 16.dp), weight = FontWeight.Bold)
+                    Txt(
+                        "${s.message} If you are in danger, call $AMBULANCE_NUMBER now.", 12, Color(0xFF74858C),
+                        Modifier.padding(top = 8.dp), align = TextAlign.Center, lineHeight = 19,
+                    )
+                    PrimaryButton("Try again", { send(s.need) }, Modifier.padding(top = 24.dp).fillMaxWidth())
+                    SecondaryButton("Call $AMBULANCE_NUMBER", Icons.Outlined.Phone, ::dialAmbulance, Modifier.padding(top = 10.dp).fillMaxWidth())
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmergencyOption(need: Emergency, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(17.dp)
+    Row(
+        Modifier.padding(bottom = 10.dp).fillMaxWidth().pressable(shape, onClick = onClick)
+            .background(Color.White, shape).border(1.dp, Color(0xFFE5EBEB), shape).padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconTile(
+            need.icon,
+            if (need.urgent) Color(0xFFFFF0EF) else Color(0xFFEAF7F5),
+            if (need.urgent) Color(0xFFDC554D) else Color(0xFF178F8B),
+            size = 44.dp, iconSize = 21.dp, corner = 14.dp,
+        )
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Txt(need.title, 13, Color(0xFF2D404A), weight = FontWeight.Bold)
+            Txt(need.subtitle, 11, Color(0xFF89969B), Modifier.padding(top = 4.dp))
+        }
+        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = Color(0xFFA5B0B4))
     }
 }
 
