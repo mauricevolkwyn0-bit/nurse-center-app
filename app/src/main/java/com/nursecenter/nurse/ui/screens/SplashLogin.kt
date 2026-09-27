@@ -25,7 +25,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -49,6 +51,7 @@ import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -214,6 +217,7 @@ fun SplashScreen() {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun LoginScreen(onLogin: () -> Unit) {
     var email by rememberSaveable { mutableStateOf("") }
@@ -251,11 +255,18 @@ fun LoginScreen(onLogin: () -> Unit) {
         val statusBar = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         val heroHeight = maxOf(230.dp, maxHeight * 0.34f)
         val screenHeight = maxHeight
+        val scroll = rememberScrollState()
+        // While the keyboard is open, keep the page scrolled to the bottom so the whole page (header included)
+        // slides up with the keyboard and the fields and sign-in button stay visible above it.
+        val imeVisible = WindowInsets.isImeVisible
+        LaunchedEffect(imeVisible) {
+            if (imeVisible) snapshotFlow { scroll.maxValue }.collect { scroll.scrollTo(it) }
+        }
         Column(
             Modifier
                 .fillMaxSize()
                 .imePadding()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scroll)
         ) {
             Column(Modifier.heightIn(min = screenHeight)) {
                 // The hero takes any spare height so the form below stays compact on tall screens.
@@ -370,6 +381,10 @@ fun LoginScreen(onLogin: () -> Unit) {
                     }
                 }
             }
+        }
+        // Covers the status bar once the page scrolls, so the header text doesn't show behind the clock and icons.
+        if (scroll.value > 0) {
+            Box(Modifier.fillMaxWidth().height(statusBar).background(Color(0xFF163E48)))
         }
     }
 }

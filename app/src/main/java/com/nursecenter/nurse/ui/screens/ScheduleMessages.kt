@@ -91,6 +91,7 @@ import com.nursecenter.nurse.data.ChatAlert
 import com.nursecenter.nurse.data.ChatMessage
 import com.nursecenter.nurse.data.ChatRepository
 import com.nursecenter.nurse.data.ChatThread
+import com.nursecenter.nurse.data.NurseStatus
 import com.nursecenter.nurse.data.RequestRealtime
 import com.nursecenter.nurse.data.ScheduleRepository
 import com.nursecenter.nurse.data.ScheduleWeek
@@ -136,7 +137,9 @@ fun ScheduleScreen() {
     val changes by RequestRealtime.changes.collectAsState()
     var availabilityOpen by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(weekStart, reload, changes) {
+    // Also reloads when Online / Offline changes, so the availability note stays current.
+    val online by NurseStatus.online.collectAsState()
+    LaunchedEffect(weekStart, reload, changes, online) {
         error = null
         try {
             data = ScheduleRepository.loadWeek(weekStart)

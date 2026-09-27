@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -52,6 +53,7 @@ import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -78,7 +80,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.nursecenter.nurse.R
+import com.nursecenter.nurse.data.AuthException
 import com.nursecenter.nurse.data.ChatAlert
+import com.nursecenter.nurse.data.NurseStatus
 import com.nursecenter.nurse.data.RequestRealtime
 import com.nursecenter.nurse.data.SupabaseAuth
 import com.nursecenter.nurse.ui.screens.DocumentsScreen
@@ -114,7 +118,8 @@ private val navItems = listOf(
 fun NurseApp() {
     var phase by rememberSaveable { mutableStateOf(Phase.Splash) }
     var active by rememberSaveable { mutableStateOf(Screen.Home) }
-    var online by rememberSaveable { mutableStateOf(true) }
+    val online by NurseStatus.online.collectAsState()
+    var savingStatus by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -128,6 +133,7 @@ fun NurseApp() {
             Phase.Login -> RequestRealtime.stop()
             Phase.App -> {
                 RequestRealtime.start(context)
+                launch { runCatching { NurseStatus.load() } }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                     ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
                 ) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -151,7 +157,33 @@ fun NurseApp() {
                 active = active,
                 onNavigate = { active = it },
                 online = online,
-                onOnlineChange = { online = it },
+                statusBusy = savingStatus,
+                onOnlineChange = { next ->
+                    savingStatus = true
+                    scope.launch {
+                        try {
+                            NurseStatus.set(next)
+                        } catch (e: Exception) {
+                            val reason = (e as? AuthException)?.message ?: "Couldn't change your status. Please try again."
+                            Toast.makeText(context, reason, Toast.LENGTH_SHORT).show()
+                        } finally {
+                            savingStatus = false
+                        }
+                    }
+                },
+                onReloadStatus = {
+                    savingStatus = true
+                    scope.launch {
+                        try {
+                            NurseStatus.load()
+                        } catch (e: Exception) {
+                            val reason = (e as? AuthException)?.message ?: "Couldn't load your status. Please try again."
+                            Toast.makeText(context, reason, Toast.LENGTH_SHORT).show()
+                        } finally {
+                            savingStatus = false
+                        }
+                    }
+                },
                 onSignOut = { scope.launch { SupabaseAuth.signOut() }; phase = Phase.Login },
             )
         }
@@ -163,8 +195,10 @@ fun NurseApp() {
 private fun MainShell(
     active: Screen,
     onNavigate: (Screen) -> Unit,
-    online: Boolean,
+    online: Boolean?,
+    statusBusy: Boolean,
     onOnlineChange: (Boolean) -> Unit,
+    onReloadStatus: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     BackHandler(enabled = active != Screen.Home) {
@@ -190,7 +224,7 @@ private fun MainShell(
             enter = expandVertically(tween(250)) + fadeIn(tween(250)),
             exit = shrinkVertically(tween(220)) + fadeOut(tween(150)),
         ) {
-            AppHeader(online, onOnlineChange)
+            AppHeader(online, statusBusy, onOnlineChange, onReloadStatus)
         }
         Box(Modifier.weight(1f)) {
             AnimatedContent(
@@ -225,7 +259,7 @@ private fun MainShell(
 }
 
 @Composable
-private fun AppHeader(online: Boolean, onOnlineChange: (Boolean) -> Unit) {
+private fun AppHeader(online: Boolean?, statusBusy: Boolean, onOnlineChange: (Boolean) -> Unit, onReloadStatus: () -> Unit) {
     val soon = rememberComingSoon()
     Row(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 16.dp),
@@ -238,31 +272,44 @@ private fun AppHeader(online: Boolean, onOnlineChange: (Boolean) -> Unit) {
         }
         IconBtn(Icons.Outlined.Notifications, "Notifications", { soon("Notifications") }, badge = true)
         Spacer(Modifier.width(8.dp))
-        OnlineToggle(online, onOnlineChange)
+        OnlineToggle(online, statusBusy, onOnlineChange, onRetry = onReloadStatus)
     }
 }
 
+/** @param online the saved status, or null if not loaded yet; tapping it then retries the load via [onRetry]. */
 @Composable
-private fun OnlineToggle(online: Boolean, onChange: (Boolean) -> Unit) {
-    val bg by animateColorAsState(if (online) Color(0xFFE7F8F2) else Color(0xFFEDF0F1), tween(300), label = "toggleBg")
-    val fg by animateColorAsState(if (online) Color(0xFF17815F) else Color(0xFF718087), tween(300), label = "toggleFg")
-    val dot by animateColorAsState(if (online) Color(0xFF29B77C) else Color(0xFF89969C), tween(300), label = "toggleDot")
+private fun OnlineToggle(online: Boolean?, busy: Boolean, onChange: (Boolean) -> Unit, onRetry: () -> Unit) {
+    val isOnline = online == true
+    val bg by animateColorAsState(if (isOnline) Color(0xFFE7F8F2) else Color(0xFFEDF0F1), tween(300), label = "toggleBg")
+    val fg by animateColorAsState(if (isOnline) Color(0xFF17815F) else Color(0xFF718087), tween(300), label = "toggleFg")
+    val dot by animateColorAsState(if (isOnline) Color(0xFF29B77C) else Color(0xFF89969C), tween(300), label = "toggleDot")
     Row(
         Modifier
             .height(40.dp)
-            .pressable(CircleShape, pressedScale = 0.93f) { onChange(!online) }
+            .pressable(CircleShape, pressedScale = 0.93f, enabled = !busy) { if (online != null) onChange(!online) else onRetry() }
             .background(bg, CircleShape)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(8.dp).background(dot, CircleShape))
+        if (busy) {
+            CircularProgressIndicator(color = fg, strokeWidth = 1.5.dp, modifier = Modifier.size(10.dp))
+        } else {
+            Box(Modifier.size(8.dp).background(dot, CircleShape))
+        }
         Spacer(Modifier.width(8.dp))
         AnimatedContent(
             targetState = online,
             transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(120)) },
             label = "toggleText",
-        ) { isOnline ->
-            Txt(if (isOnline) "Online" else "Offline", 13, fg, weight = FontWeight.Bold)
+        ) { status ->
+            Txt(
+                when (status) {
+                    true -> "Online"
+                    false -> "Offline"
+                    null -> "Status"
+                },
+                13, fg, weight = FontWeight.Bold,
+            )
         }
     }
 }

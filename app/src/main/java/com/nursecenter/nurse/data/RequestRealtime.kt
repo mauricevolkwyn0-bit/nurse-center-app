@@ -39,7 +39,8 @@ object RequestRealtime {
     private const val BOOKINGS_TOPIC = "realtime:nurse-bookings"
     private const val ALERTS_TOPIC = "realtime:nurse-job-alerts"
     private const val MESSAGES_TOPIC = "realtime:nurse-messages"
-    private val TOPICS = listOf(BOOKINGS_TOPIC, ALERTS_TOPIC, MESSAGES_TOPIC)
+    private const val STATUS_TOPIC = "realtime:nurse-status"
+    private val TOPICS = listOf(BOOKINGS_TOPIC, ALERTS_TOPIC, MESSAGES_TOPIC, STATUS_TOPIC)
 
     private val _changes = MutableStateFlow(0)
     /** Increments whenever a request arrives or is closed (cancelled, declined, taken); screens observe it to refresh. */
@@ -68,6 +69,7 @@ object RequestRealtime {
         synchronized(alerted) { alerted.clear() }
         synchronized(closed) { closed.clear() }
         ChatAlert.reset()
+        NurseStatus.clear()
     }
 
     private suspend fun CoroutineScope.connectLoop(context: Context) {
@@ -140,6 +142,12 @@ object RequestRealtime {
             ?: System.currentTimeMillis()
         val expiresAt = start + RESPONSE_WINDOW.toMillis()
         if (expiresAt <= System.currentTimeMillis()) return
+        // Offline nurses aren't alerted, matching the website. Unknown status fails open so requests aren't missed.
+        if (NurseStatus.online.value == false) {
+            Log.i(TAG, "Nurse is offline; not alerting for booking $bookingId")
+            _changes.value++
+            return
+        }
         val isNew = synchronized(alerted) { alerted.add(bookingId) }
         if (!isNew) return
         Log.i(TAG, "New request for booking $bookingId")
@@ -179,6 +187,8 @@ object RequestRealtime {
             webSocket.send(message(ALERTS_TOPIC, "phx_join", joinPayload("job_alerts", listOf("INSERT", "UPDATE"), mine, token)))
             // messages has no caregiver column; its RLS policy limits delivery to the nurse's own conversations.
             webSocket.send(message(MESSAGES_TOPIC, "phx_join", joinPayload("messages", listOf("INSERT"), null, token)))
+            // Online/Offline changes made on the website.
+            webSocket.send(message(STATUS_TOPIC, "phx_join", joinPayload("caregiver_profiles", listOf("UPDATE"), "id=eq.$userId", token)))
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -226,6 +236,9 @@ object RequestRealtime {
                             },
                         )
                     }
+                }
+                "caregiver_profiles" -> if (record.has("is_available") && !record.isNull("is_available")) {
+                    NurseStatus.onRemoteChange(record.getBoolean("is_available"))
                 }
                 "messages" -> if (type == "INSERT" && record.isNull("deleted_at")) {
                     val message = runCatching { ChatRepository.toMessage(record, userId) }.getOrNull() ?: return
