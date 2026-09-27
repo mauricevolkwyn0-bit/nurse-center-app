@@ -1,5 +1,7 @@
 package com.nursecenter.nurse.ui.screens
 
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
@@ -45,6 +47,7 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.EventAvailable
 import androidx.compose.material.icons.outlined.EventBusy
+import androidx.compose.material.icons.outlined.HeadsetMic
 import androidx.compose.material.icons.outlined.Phone
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.rounded.Add
@@ -94,8 +97,12 @@ import com.nursecenter.nurse.data.ChatThread
 import com.nursecenter.nurse.data.NurseStatus
 import com.nursecenter.nurse.data.RequestRealtime
 import com.nursecenter.nurse.data.ScheduleRepository
+import com.nursecenter.nurse.data.SUPPORT_CHAT_ID
+import com.nursecenter.nurse.data.SUPPORT_PHONE
 import com.nursecenter.nurse.data.ScheduleWeek
 import com.nursecenter.nurse.data.Shift
+import com.nursecenter.nurse.data.SupportRepository
+import com.nursecenter.nurse.data.SupportSummary
 import com.nursecenter.nurse.data.WeeklyAvailability
 import com.nursecenter.nurse.ui.Eyebrow
 import com.nursecenter.nurse.ui.IconBtn
@@ -515,12 +522,15 @@ fun MessagesScreen(openChat: String?, onOpenChat: (String?) -> Unit) {
     BackHandler(enabled = openChat != null) { onOpenChat(null) }
 
     var threads by remember { mutableStateOf<List<ChatThread>?>(null) }
+    var support by remember { mutableStateOf<SupportSummary?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
 
     // Also reloads on leaving a chat, so its unread count clears.
     LaunchedEffect(reload, openChat) {
         error = null
+        // Separate from the client chats so a problem with one never hides the other.
+        launch { runCatching { SupportRepository.summary() }.onSuccess { support = it } }
         try {
             threads = ChatRepository.loadThreads()
         } catch (e: AuthException) {
@@ -547,13 +557,19 @@ fun MessagesScreen(openChat: String?, onOpenChat: (String?) -> Unit) {
         if (id != null) {
             ChatView(id, threads?.find { it.id == id }, onBack = { onOpenChat(null) })
         } else {
-            ThreadList(threads, error, onRetry = { reload++ }, onOpen = { onOpenChat(it) })
+            ThreadList(threads, support, error, onRetry = { reload++ }, onOpen = { onOpenChat(it) })
         }
     }
 }
 
 @Composable
-private fun ThreadList(threads: List<ChatThread>?, error: String?, onRetry: () -> Unit, onOpen: (String) -> Unit) {
+private fun ThreadList(
+    threads: List<ChatThread>?,
+    support: SupportSummary?,
+    error: String?,
+    onRetry: () -> Unit,
+    onOpen: (String) -> Unit,
+) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(top = 12.dp)) {
         Column(Modifier.enterUp(0)) {
             Eyebrow("Conversations")
@@ -566,14 +582,20 @@ private fun ThreadList(threads: List<ChatThread>?, error: String?, onRetry: () -
             lineHeight = 19,
         )
         Column(Modifier.padding(top = 12.dp, bottom = 24.dp)) {
+            // Always pinned first, even before the client chats load.
+            SupportThreadRow(support, Modifier.enterUp(2)) { onOpen(SUPPORT_CHAT_ID) }
+            HorizontalDivider(color = Color(0xFFE7ECEC))
             when {
                 threads == null && error != null -> ScheduleMessage(error, action = "Try again", onAction = onRetry)
                 threads == null -> Box(Modifier.fillMaxWidth().padding(vertical = 40.dp), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = NC.Teal, strokeWidth = 3.dp, modifier = Modifier.size(28.dp))
                 }
-                threads.isEmpty() -> ScheduleMessage("No conversations yet. When a client messages you about a booking, it will appear here.")
+                // Only when there's nothing at all to show, support chat included.
+                threads.isEmpty() && support?.lastMessage == null ->
+                    ScheduleMessage("No conversations yet. When a client messages you about a booking, it will appear here.")
+                threads.isEmpty() -> Unit
                 else -> threads.forEachIndexed { index, t ->
-                    ThreadRow(t, Modifier.enterUp(index + 2)) { onOpen(t.id) }
+                    ThreadRow(t, Modifier.enterUp(index + 3)) { onOpen(t.id) }
                     HorizontalDivider(color = Color(0xFFE7ECEC))
                 }
             }
@@ -610,6 +632,37 @@ private fun ThreadRow(t: ChatThread, modifier: Modifier, onClick: () -> Unit) {
     }
 }
 
+@Composable
+private fun SupportThreadRow(support: SupportSummary?, modifier: Modifier, onClick: () -> Unit) {
+    val unread = support?.unread ?: 0
+    Row(
+        modifier.fillMaxWidth().pressable(RoundedCornerShape(12.dp), pressedScale = 0.98f, onClick = onClick).padding(vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(48.dp).background(NC.DeepTeal, CircleShape), contentAlignment = Alignment.Center) {
+            Icon(Icons.Outlined.HeadsetMic, null, tint = Color.White, modifier = Modifier.size(21.dp))
+        }
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Row {
+                Txt("Nurse Center Support", 15, Color(0xFF283B46), Modifier.weight(1f), weight = FontWeight.Bold, maxLines = 1)
+                Txt(shortTime(support?.lastAt), 11, Color(0xFF8A989E), weight = FontWeight.SemiBold)
+            }
+            Txt(
+                support?.lastMessage ?: "Questions? Chat with our support team.", 12,
+                if (unread > 0) Color(0xFF3E525B) else Color(0xFF71838B),
+                Modifier.padding(top = 4.dp), weight = if (unread > 0) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1,
+            )
+        }
+        if (unread > 0) {
+            Txt(
+                unread.toString(), 11, Color.White,
+                Modifier.background(Color(0xFFEF9D96), CircleShape).padding(horizontal = 7.dp, vertical = 2.dp),
+                weight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
 private sealed interface ChatRow {
     data class Day(val date: LocalDate) : ChatRow
     data class Msg(val message: ChatMessage) : ChatRow
@@ -636,6 +689,9 @@ private fun ChatView(conversationId: String, thread: ChatThread?, onBack: () -> 
     var reload by remember { mutableIntStateOf(0) }
     var draft by rememberSaveable { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
+    // The support chat lives in its own tables; client chats in conversations/messages.
+    val support = conversationId == SUPPORT_CHAT_ID
+    suspend fun markRead() = if (support) SupportRepository.markRead() else ChatRepository.markRead(conversationId)
 
     // No notifications for this conversation while it's on screen; clear any already showing.
     DisposableEffect(conversationId) {
@@ -647,8 +703,8 @@ private fun ChatView(conversationId: String, thread: ChatThread?, onBack: () -> 
     LaunchedEffect(conversationId, reload) {
         error = null
         try {
-            messages = ChatRepository.loadMessages(conversationId)
-            ChatRepository.markRead(conversationId)
+            messages = if (support) SupportRepository.loadMessages() else ChatRepository.loadMessages(conversationId)
+            markRead()
         } catch (e: AuthException) {
             error = e.message
         } catch (e: Exception) {
@@ -660,7 +716,7 @@ private fun ChatView(conversationId: String, thread: ChatThread?, onBack: () -> 
             if (m.conversationId != conversationId) return@collect
             val current = messages ?: return@collect
             if (current.none { it.id == m.id }) messages = current + m
-            if (!m.mine) ChatRepository.markRead(conversationId)
+            if (!m.mine) markRead()
         }
     }
 
@@ -674,7 +730,7 @@ private fun ChatView(conversationId: String, thread: ChatThread?, onBack: () -> 
         draft = ""
         scope.launch {
             try {
-                val sent = ChatRepository.send(conversationId, text)
+                val sent = if (support) SupportRepository.send(text) else ChatRepository.send(conversationId, text)
                 // The realtime echo may already have added it.
                 val current = messages.orEmpty()
                 if (current.none { it.id == sent.id }) messages = current + sent
@@ -689,7 +745,7 @@ private fun ChatView(conversationId: String, thread: ChatThread?, onBack: () -> 
         Unit
     }
 
-    val name = thread?.clientName ?: "Client"
+    val name = if (support) "Nurse Center Support" else thread?.clientName ?: "Client"
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
@@ -697,14 +753,26 @@ private fun ChatView(conversationId: String, thread: ChatThread?, onBack: () -> 
         ) {
             IconBtn(Icons.AutoMirrored.Rounded.ArrowBack, "Back", onBack)
             Spacer(Modifier.width(12.dp))
-            Box(Modifier.size(40.dp).background(Color(0xFFE5F6F3), CircleShape), contentAlignment = Alignment.Center) {
-                Txt(initials(name), 14, Color(0xFF168C89), weight = FontWeight.Bold)
+            if (support) {
+                Box(Modifier.size(40.dp).background(NC.DeepTeal, CircleShape), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.HeadsetMic, null, tint = Color.White, modifier = Modifier.size(19.dp))
+                }
+            } else {
+                Box(Modifier.size(40.dp).background(Color(0xFFE5F6F3), CircleShape), contentAlignment = Alignment.Center) {
+                    Txt(initials(name), 14, Color(0xFF168C89), weight = FontWeight.Bold)
+                }
             }
             Column(Modifier.weight(1f).padding(start = 12.dp)) {
                 Txt(name, 15, Color(0xFF293C47), weight = FontWeight.Bold, maxLines = 1)
-                Txt("Nurse Center client", 11, Color(0xFF8A989E), weight = FontWeight.SemiBold)
+                Txt(if (support) "Every day, 06:00–22:00" else "Nurse Center client", 11, Color(0xFF8A989E), weight = FontWeight.SemiBold)
             }
-            IconBtn(Icons.Outlined.Phone, "Call", { soon("Calling") })
+            if (support) {
+                IconBtn(Icons.Outlined.Phone, "Call support", {
+                    runCatching { context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$SUPPORT_PHONE"))) }
+                })
+            } else {
+                IconBtn(Icons.Outlined.Phone, "Call", { soon("Calling") })
+            }
         }
         HorizontalDivider(color = Color(0xFFE6ECEC))
 
@@ -717,7 +785,8 @@ private fun ChatView(conversationId: String, thread: ChatThread?, onBack: () -> 
                     color = NC.Teal, strokeWidth = 3.dp, modifier = Modifier.align(Alignment.Center).size(28.dp),
                 )
                 rows.isEmpty() -> Txt(
-                    "No messages yet. Say hello to $name.", 13, Color(0xFF8A989E),
+                    if (support) "Send us a message and our support team will reply here." else "No messages yet. Say hello to $name.",
+                    13, Color(0xFF8A989E),
                     Modifier.align(Alignment.Center).padding(24.dp), align = TextAlign.Center,
                 )
                 else -> LazyColumn(

@@ -163,7 +163,7 @@ fun PrimaryButton(
             CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
         } else {
             leading?.let { Icon(it, null, tint = Color.White, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)) }
-            Txt(text, 14, Color.White, weight = FontWeight.Bold)
+            Txt(text, 14, Color.White, weight = FontWeight.Bold, maxLines = 1)
             trailing?.let { Spacer(Modifier.width(6.dp)); Icon(it, null, tint = Color.White, modifier = Modifier.size(20.dp)) }
         }
     }
@@ -184,7 +184,7 @@ fun SecondaryButton(text: String, icon: ImageVector, onClick: () -> Unit, modifi
     ) {
         Icon(icon, null, tint = Color(0xFF65767E), modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(8.dp))
-        Txt(text, 13, Color(0xFF65767E), weight = FontWeight.Bold)
+        Txt(text, 13, Color(0xFF65767E), weight = FontWeight.Bold, maxLines = 1)
     }
 }
 

@@ -3,6 +3,8 @@ package com.nursecenter.nurse.ui.screens
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
@@ -80,6 +82,8 @@ import androidx.compose.ui.unit.sp
 import com.nursecenter.nurse.BuildConfig
 import com.nursecenter.nurse.data.AccountSummary
 import com.nursecenter.nurse.data.AuthException
+import com.nursecenter.nurse.data.DocumentSlot
+import com.nursecenter.nurse.data.DocumentsRepository
 import com.nursecenter.nurse.data.MoreRepository
 import com.nursecenter.nurse.data.NurseProfile
 import com.nursecenter.nurse.data.ProfileRepository
@@ -87,7 +91,9 @@ import com.nursecenter.nurse.data.RequestRealtime
 import com.nursecenter.nurse.data.Review
 import com.nursecenter.nurse.data.ReviewsData
 import com.nursecenter.nurse.data.ReviewsRepository
+import com.nursecenter.nurse.data.SUPPORT_PHONE
 import com.nursecenter.nurse.data.SupabaseAuth
+import com.nursecenter.nurse.data.UploadedDocument
 import com.nursecenter.nurse.data.WalletData
 import com.nursecenter.nurse.data.WalletEntry
 import com.nursecenter.nurse.data.WalletRepository
@@ -95,6 +101,7 @@ import com.nursecenter.nurse.ui.CardList
 import com.nursecenter.nurse.ui.Eyebrow
 import com.nursecenter.nurse.ui.IconBtn
 import com.nursecenter.nurse.ui.IconTile
+import com.nursecenter.nurse.ui.NcSheet
 import com.nursecenter.nurse.ui.PageTitle
 import com.nursecenter.nurse.ui.RemoteImage
 import com.nursecenter.nurse.ui.SecondaryButton
@@ -584,55 +591,212 @@ private fun ProfileField(
 
 @Composable
 fun DocumentsScreen(back: () -> Unit) {
-    val soon = rememberComingSoon()
-    SubScreen("Documents", "Credentials & compliance", back) {
-        Row(
-            Modifier.enterUp(0).padding(horizontal = 20.dp).padding(top = 12.dp).fillMaxWidth()
-                .background(Color(0xFFE8F7F2), RoundedCornerShape(18.dp)).padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.size(40.dp).background(Color.White, CircleShape), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.VerifiedUser, null, tint = Color(0xFF209C7B), modifier = Modifier.size(21.dp))
-            }
-            Column(Modifier.padding(start = 12.dp)) {
-                Txt("Profile fully verified", 13, Color(0xFF28534A), weight = FontWeight.Bold)
-                Txt("All required documents are current.", 11, Color(0xFF69827C), Modifier.padding(top = 4.dp))
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var slots by remember { mutableStateOf<List<DocumentSlot>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var reload by remember { mutableIntStateOf(0) }
+    var choosing by rememberSaveable { mutableStateOf(false) }
+    // The document type being uploaded: set when the nurse picks it, kept while the file picker is open.
+    var pendingType by rememberSaveable { mutableStateOf<String?>(null) }
+    var uploadingType by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(reload) {
+        error = null
+        try {
+            slots = DocumentsRepository.load()
+        } catch (e: AuthException) {
+            error = e.message
+        } catch (e: Exception) {
+            error = "Couldn't load your documents. Please try again."
+        }
+    }
+
+    fun toast(message: String) = Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+
+    // Android's file picker: the nurse chooses a PDF or photo from their phone; no storage permission needed.
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val type = pendingType
+        pendingType = null
+        if (uri == null || type == null) return@rememberLauncherForActivityResult
+        uploadingType = type
+        scope.launch {
+            try {
+                DocumentsRepository.upload(context, type, uri)
+                toast("Document uploaded. We'll review it shortly.")
+                reload++
+            } catch (e: Exception) {
+                toast((e as? AuthException)?.message ?: "Couldn't upload your document. Please try again.")
+            } finally {
+                uploadingType = null
             }
         }
-        Column(Modifier.enterUp(1).padding(horizontal = 20.dp).padding(top = 24.dp, bottom = 28.dp)) {
-            SectionTitle("Your documents")
-            CardList(
-                listOf(
-                    { DocumentRow("SANC Registration", "Expires 31 Dec 2026") { soon("Document preview") } },
-                    { DocumentRow("South African ID", "Verified 14 Mar 2026") { soon("Document preview") } },
-                    { DocumentRow("Police Clearance", "Expires 08 Feb 2027") { soon("Document preview") } },
-                    { DocumentRow("Nursing Qualification", "Verified 14 Mar 2026") { soon("Document preview") } },
-                )
-            )
-            SecondaryButton("Upload document", Icons.Outlined.CloudUpload, { soon("Uploading") }, Modifier.padding(top = 20.dp).fillMaxWidth())
-            Txt(
-                "PDF, JPG or PNG. Your documents are encrypted and only used for verification.", 11, Color(0xFF909CA1),
-                Modifier.padding(top = 16.dp).widthIn(max = 280.dp).align(Alignment.CenterHorizontally),
-                lineHeight = 16, align = TextAlign.Center,
-            )
+    }
+    fun pickFile(type: String) {
+        pendingType = type
+        runCatching { picker.launch(arrayOf("application/pdf", "image/*")) }
+            .onFailure { pendingType = null; toast("No file browser found on this phone.") }
+    }
+
+    fun view(document: UploadedDocument) {
+        scope.launch {
+            try {
+                val url = DocumentsRepository.viewUrl(document)
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            } catch (e: Exception) {
+                toast((e as? AuthException)?.message ?: "Couldn't open this document.")
+            }
+        }
+    }
+
+    SubScreen("Documents", "Credentials & compliance", back) {
+        val s = slots
+        when {
+            s == null && error != null -> ErrorNote(error!!, Modifier.padding(20.dp)) { reload++ }
+            s == null -> Box(Modifier.fillMaxWidth().padding(vertical = 60.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = NC.Teal, strokeWidth = 3.dp, modifier = Modifier.size(28.dp))
+            }
+            else -> {
+                DocumentsStatus(s, Modifier.enterUp(0).padding(horizontal = 20.dp).padding(top = 12.dp))
+                Column(Modifier.enterUp(1).padding(horizontal = 20.dp).padding(top = 24.dp, bottom = 28.dp)) {
+                    SectionTitle("Your documents")
+                    CardList(
+                        s.map { slot ->
+                            {
+                                DocumentRow(slot, uploading = uploadingType == slot.type) {
+                                    val uploaded = slot.uploaded
+                                    when {
+                                        uploadingType != null -> Unit
+                                        uploaded != null -> view(uploaded)
+                                        else -> pickFile(slot.type)
+                                    }
+                                }
+                            }
+                        }
+                    )
+                    SecondaryButton(
+                        "Upload document", Icons.Outlined.CloudUpload,
+                        { if (uploadingType == null) choosing = true else toast("Please wait for the current upload to finish.") },
+                        Modifier.padding(top = 20.dp).fillMaxWidth(),
+                    )
+                    Txt(
+                        "PDF, JPG or PNG up to 10 MB. Your documents are private and only used for verification.", 11, Color(0xFF909CA1),
+                        Modifier.padding(top = 16.dp).widthIn(max = 280.dp).align(Alignment.CenterHorizontally),
+                        lineHeight = 16, align = TextAlign.Center,
+                    )
+                }
+            }
+        }
+    }
+
+    if (choosing) {
+        DocumentTypeSheet(
+            slots.orEmpty(),
+            onDismiss = { choosing = false },
+            onChoose = { type -> choosing = false; pickFile(type) },
+        )
+    }
+}
+
+/** Overall verification status, like the banner on the web Documents page. */
+@Composable
+private fun DocumentsStatus(slots: List<DocumentSlot>, modifier: Modifier = Modifier) {
+    val missing = slots.count { it.required && it.uploaded == null }
+    val inReview = slots.count { it.uploaded != null && !it.uploaded.verified }
+    val (title, detail) = when {
+        missing > 0 -> "$missing required ${if (missing == 1) "document" else "documents"} missing" to
+            "Upload them so you can accept bookings."
+        inReview > 0 -> "Documents under review" to "The Nurse Center team is checking your uploads."
+        else -> "Profile fully verified" to "All your documents have been verified."
+    }
+    val (bg, fg, sub, icon) = when {
+        missing > 0 -> listOf(Color(0xFFFFF4E6), Color(0xFF8A5A14), Color(0xFFA27B45), Color(0xFFD29A3A))
+        inReview > 0 -> listOf(Color(0xFFEEF5F4), Color(0xFF2C5552), Color(0xFF69807F), Color(0xFF1C9891))
+        else -> listOf(Color(0xFFE8F7F2), Color(0xFF28534A), Color(0xFF69827C), Color(0xFF209C7B))
+    }
+    Row(modifier.fillMaxWidth().background(bg, RoundedCornerShape(18.dp)).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(40.dp).background(Color.White, CircleShape), contentAlignment = Alignment.Center) {
+            Icon(if (missing > 0) Icons.Outlined.Description else Icons.Outlined.VerifiedUser, null, tint = icon, modifier = Modifier.size(21.dp))
+        }
+        Column(Modifier.padding(start = 12.dp)) {
+            Txt(title, 13, fg, weight = FontWeight.Bold)
+            Txt(detail, 11, sub, Modifier.padding(top = 4.dp))
         }
     }
 }
 
 @Composable
-private fun DocumentRow(title: String, detail: String, onClick: () -> Unit) {
+private fun DocumentRow(slot: DocumentSlot, uploading: Boolean, onClick: () -> Unit) {
+    val uploaded = slot.uploaded
     Row(
         Modifier.fillMaxWidth().pressable(RoundedCornerShape(0.dp), pressedScale = 0.985f, onClick = onClick).padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconTile(Icons.Outlined.Description, NC.TealSoft, Color(0xFF178E89))
-        Column(Modifier.weight(1f).padding(start = 12.dp)) {
-            Txt(title, 13, Color(0xFF30434D), weight = FontWeight.Bold)
-            Txt(detail, 11, Color(0xFF89969C), Modifier.padding(top = 4.dp))
+        IconTile(
+            if (uploaded != null) Icons.Outlined.Description else Icons.Outlined.CloudUpload,
+            if (uploaded != null) NC.TealSoft else Color(0xFFF3F5F5),
+            if (uploaded != null) Color(0xFF178E89) else Color(0xFF8B989E),
+        )
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Txt(slot.label, 13, Color(0xFF30434D), weight = FontWeight.Bold)
+            val date = uploaded?.uploadedAt?.format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH))
+            Txt(
+                when {
+                    uploading -> "Uploading…"
+                    date != null -> "Uploaded $date · tap to view"
+                    else -> "Not uploaded · tap to upload"
+                },
+                11, Color(0xFF89969C), Modifier.padding(top = 4.dp),
+            )
         }
-        Icon(Icons.Rounded.Check, null, tint = Color(0xFF28A178), modifier = Modifier.size(14.dp))
-        Spacer(Modifier.width(4.dp))
-        Txt("Verified", 11, Color(0xFF28A178), weight = FontWeight.Bold)
+        when {
+            uploading -> CircularProgressIndicator(color = NC.Teal, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+            uploaded?.verified == true -> {
+                Icon(Icons.Rounded.Check, null, tint = Color(0xFF28A178), modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(4.dp))
+                Txt("Verified", 11, Color(0xFF28A178), weight = FontWeight.Bold)
+            }
+            uploaded != null -> Txt("In review", 11, Color(0xFFD29A3A), weight = FontWeight.Bold)
+            slot.required -> Txt("Required", 11, Color(0xFFD9615B), weight = FontWeight.Bold)
+            else -> Txt("Optional", 11, Color(0xFF94A0A5), weight = FontWeight.Bold)
+        }
+    }
+}
+
+/** Asks which document is being uploaded before opening the file picker. */
+@Composable
+private fun DocumentTypeSheet(slots: List<DocumentSlot>, onDismiss: () -> Unit, onChoose: (String) -> Unit) {
+    NcSheet(onDismiss) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
+            Eyebrow("Upload document")
+            Txt("Which document is this?", 21, Color(0xFF253844), Modifier.padding(top = 4.dp), weight = FontWeight.Bold)
+            Txt(
+                "Choose the document, then select the file from your phone.", 12, Color(0xFF7D8C92),
+                Modifier.padding(top = 8.dp, bottom = 16.dp), lineHeight = 18,
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                slots.forEach { slot ->
+                    val shape = RoundedCornerShape(14.dp)
+                    Row(
+                        Modifier.fillMaxWidth().pressable(shape, pressedScale = 0.98f) { onChoose(slot.type) }
+                            .background(Color.White, shape).border(1.dp, Color(0xFFE3E9E9), shape).padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Txt(slot.label, 13, Color(0xFF344750), weight = FontWeight.Bold)
+                            Txt(
+                                when {
+                                    slot.uploaded != null -> "Uploaded · this replaces it"
+                                    else -> slot.description ?: if (slot.required) "Required" else "Optional"
+                                },
+                                11, Color(0xFF8B989D), Modifier.padding(top = 3.dp), lineHeight = 15,
+                            )
+                        }
+                        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = Color(0xFFA5B0B4))
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -721,7 +885,6 @@ private fun ReviewCard(review: Review) {
     }
 }
 
-private const val SUPPORT_PHONE = "+27704256338"
 private const val SUPPORT_EMAIL = "info@nursecenter.co.za"
 
 private val FAQS = listOf(
@@ -734,9 +897,8 @@ private val FAQS = listOf(
 )
 
 @Composable
-fun SupportScreen(back: () -> Unit) {
+fun SupportScreen(back: () -> Unit, onStartChat: () -> Unit) {
     val context = LocalContext.current
-    val soon = rememberComingSoon()
     var openFaq by rememberSaveable { mutableIntStateOf(0) }
     fun open(intent: Intent) = runCatching { context.startActivity(intent) }
 
@@ -752,7 +914,7 @@ fun SupportScreen(back: () -> Unit) {
                 Modifier.padding(top = 8.dp), lineHeight = 19,
             )
             Row(Modifier.padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SupportButton("Start a chat", Icons.Outlined.ChatBubbleOutline, filled = true, Modifier.weight(1f)) { soon("Support chat") }
+                SupportButton("Start a chat", Icons.Outlined.ChatBubbleOutline, filled = true, Modifier.weight(1f), onClick = onStartChat)
                 SupportButton("Call support", Icons.Outlined.Phone, filled = false, Modifier.weight(1f)) {
                     open(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$SUPPORT_PHONE")))
                 }

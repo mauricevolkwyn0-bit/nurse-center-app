@@ -21,12 +21,29 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.nursecenter.nurse.MainActivity
 import com.nursecenter.nurse.R
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
-/** Vibrates, plays the NurseCenter chime and shows a heads-up notification when a client request arrives. */
+/**
+ * Vibrates, plays the NurseCenter chime and shows a heads-up notification when a client request arrives,
+ * then alerts again, with a longer vibration, when one minute of the response window is left.
+ */
 object IncomingRequestAlert {
     private const val TAG = "IncomingRequestAlert"
     private const val CHANNEL_ID = "incoming_requests"
+    private const val REMINDER_BEFORE_MS = 60_000L
     private val VIBRATION = longArrayOf(0, 700, 300, 700, 300, 700, 300, 700)
+    /** About twice as long as the first alert, so the last-minute reminder stands out. */
+    private val REMINDER_VIBRATION = longArrayOf(0, 1500, 400, 1500, 400, 1500, 400, 1500, 400, 1500)
+
+    private val reminderScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    /** Pending last-minute reminders by booking ID. */
+    private val reminders = ConcurrentHashMap<String, Job>()
 
     // Alarm usage so the alert still vibrates and sounds when the app is in the background;
     // Android drops unattributed vibrations from background apps.
@@ -43,13 +60,39 @@ object IncomingRequestAlert {
     /** @param expiresAtMillis when the nurse's window to respond closes. */
     fun fire(context: Context, bookingId: String, expiresAtMillis: Long) {
         ringingFor = bookingId
-        vibrate(context)
+        vibrate(context, VIBRATION)
         playSound(context)
-        notify(context, bookingId, expiresAtMillis)
+        notify(context, bookingId, expiresAtMillis, lastMinute = false)
+        scheduleReminder(context.applicationContext, bookingId, expiresAtMillis)
     }
 
-    /** Silences and removes the alert for a request that was cancelled or taken elsewhere. */
+    /** Alerts again a minute before the window closes, unless the request was answered, closed or the nurse went offline. */
+    private fun scheduleReminder(context: Context, bookingId: String, expiresAtMillis: Long) {
+        reminders.remove(bookingId)?.cancel()
+        val wait = expiresAtMillis - REMINDER_BEFORE_MS - System.currentTimeMillis()
+        // Arrived with a minute or less left: the first alert is the last-minute one.
+        if (wait <= 0) return
+        reminders[bookingId] = reminderScope.launch {
+            delay(wait)
+            reminders.remove(bookingId)
+            if (NurseStatus.online.value == false) return@launch
+            Log.i(TAG, "One minute left for booking $bookingId")
+            ringingFor = bookingId
+            vibrate(context, REMINDER_VIBRATION)
+            playSound(context)
+            notify(context, bookingId, expiresAtMillis, lastMinute = true)
+        }
+    }
+
+    /** Cancels every pending reminder, e.g. on sign-out. */
+    fun cancelReminders() {
+        reminders.values.forEach { it.cancel() }
+        reminders.clear()
+    }
+
+    /** Silences and removes the alert for a request that was answered, cancelled or taken elsewhere. */
     fun dismiss(context: Context, bookingId: String) {
+        reminders.remove(bookingId)?.cancel()
         NotificationManagerCompat.from(context).cancel(bookingId.hashCode())
         if (ringingFor != bookingId) return
         ringingFor = null
@@ -67,10 +110,10 @@ object IncomingRequestAlert {
             context.getSystemService(Vibrator::class.java)
         }
 
-    private fun vibrate(context: Context) {
+    private fun vibrate(context: Context, pattern: LongArray) {
         val vibrator = vibrator(context)
         if (vibrator == null || !vibrator.hasVibrator()) return
-        val effect = VibrationEffect.createWaveform(VIBRATION, -1)
+        val effect = VibrationEffect.createWaveform(pattern, -1)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             vibrator.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
         } else {
@@ -96,7 +139,8 @@ object IncomingRequestAlert {
         }.onFailure { Log.w(TAG, "Couldn't play request chime: ${it.message}") }
     }
 
-    private fun notify(context: Context, bookingId: String, expiresAtMillis: Long) {
+    /** @param lastMinute true for the one-minute reminder, which re-posts the notification with urgent wording. */
+    private fun notify(context: Context, bookingId: String, expiresAtMillis: Long, lastMinute: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
@@ -118,8 +162,11 @@ object IncomingRequestAlert {
         val remaining = (expiresAtMillis - System.currentTimeMillis()).coerceAtLeast(1_000L)
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("New care request")
-            .setContentText("A client has requested a visit. Respond before the timer runs out.")
+            .setContentTitle(if (lastMinute) "1 minute left to respond" else "New care request")
+            .setContentText(
+                if (lastMinute) "A client's request is about to expire. Accept or decline now."
+                else "A client has requested a visit. Respond before the timer runs out."
+            )
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_EVENT)
             // Live countdown to the end of the response window; the notification removes itself when it expires.

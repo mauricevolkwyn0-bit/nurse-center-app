@@ -83,6 +83,8 @@ import com.nursecenter.nurse.R
 import com.nursecenter.nurse.data.AuthException
 import com.nursecenter.nurse.data.ChatAlert
 import com.nursecenter.nurse.data.NurseStatus
+import com.nursecenter.nurse.data.PushTokens
+import com.nursecenter.nurse.data.SUPPORT_CHAT_ID
 import com.nursecenter.nurse.data.RequestRealtime
 import com.nursecenter.nurse.data.SupabaseAuth
 import com.nursecenter.nurse.ui.screens.DocumentsScreen
@@ -99,8 +101,10 @@ import com.nursecenter.nurse.ui.screens.Screen
 import com.nursecenter.nurse.ui.screens.SplashScreen
 import com.nursecenter.nurse.ui.screens.WalletScreen
 import com.nursecenter.nurse.ui.theme.NC
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 private enum class Phase { Splash, Login, App }
 
@@ -127,13 +131,22 @@ fun NurseApp() {
     LaunchedEffect(phase) {
         when (phase) {
             Phase.Splash -> {
+                // A sign-in saved on this device skips the login screen. Its token is refreshed during the
+                // splash; if Supabase rejects it the session is cleared and the nurse signs in again. A slow or
+                // offline network keeps the session, so the nurse still lands on Home.
+                val check = async {
+                    if (SupabaseAuth.session != null) withTimeoutOrNull(6_000) { runCatching { SupabaseAuth.validSession() } }
+                }
                 delay(1800)
-                phase = Phase.Login
+                check.await()
+                phase = if (SupabaseAuth.session != null) Phase.App else Phase.Login
             }
             Phase.Login -> RequestRealtime.stop()
             Phase.App -> {
                 RequestRealtime.start(context)
                 launch { runCatching { NurseStatus.load() } }
+                // Lets the website push new requests to this phone while the app is closed.
+                launch { PushTokens.register() }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                     ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
                 ) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -184,7 +197,13 @@ fun NurseApp() {
                         }
                     }
                 },
-                onSignOut = { scope.launch { SupabaseAuth.signOut() }; phase = Phase.Login },
+                onSignOut = {
+                    scope.launch {
+                        PushTokens.unregister()
+                        SupabaseAuth.signOut()
+                    }
+                    phase = Phase.Login
+                },
             )
         }
     }
@@ -242,7 +261,10 @@ private fun MainShell(
                     Screen.Profile -> ProfileScreen(back = { onNavigate(Screen.More) })
                     Screen.Documents -> DocumentsScreen(back = { onNavigate(Screen.More) })
                     Screen.Reviews -> ReviewsScreen(back = { onNavigate(Screen.More) })
-                    Screen.Support -> SupportScreen(back = { onNavigate(Screen.More) })
+                    Screen.Support -> SupportScreen(
+                        back = { onNavigate(Screen.More) },
+                        onStartChat = { openChat = SUPPORT_CHAT_ID; onNavigate(Screen.Messages) },
+                    )
                 }
             }
         }

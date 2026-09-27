@@ -85,6 +85,8 @@ import com.nursecenter.nurse.data.AuthException
 import com.nursecenter.nurse.data.BookingSummary
 import com.nursecenter.nurse.data.HomeData
 import com.nursecenter.nurse.data.HomeRepository
+import com.nursecenter.nurse.data.IncomingRequestAlert
+import com.nursecenter.nurse.data.NurseStatus
 import com.nursecenter.nurse.data.PanicRepository
 import com.nursecenter.nurse.data.RESPONSE_WINDOW
 import com.nursecenter.nurse.data.RequestsData
@@ -132,9 +134,9 @@ fun HomeScreen(goTo: (Screen) -> Unit) {
             error = "Couldn't load your dashboard. Please try again."
         }
     }
-    // Backup for realtime: re-check an open request so one cancelled on the website doesn't linger.
-    LaunchedEffect(data) {
-        if (data?.newRequest != null) {
+    // Backup for realtime: re-check regularly so new requests appear, and ones cancelled on the website go, even if a live update is missed.
+    LaunchedEffect(Unit) {
+        while (true) {
             delay(REQUEST_RECHECK_MS)
             reload++
         }
@@ -342,14 +344,19 @@ private fun EmergencyOption(need: Emergency, onClick: () -> Unit) {
     }
 }
 
+private const val OFFLINE_MESSAGE =
+    "You're offline, so you won't receive new requests. Switch to Online at the top of the screen to start receiving them."
+
 @Composable
 private fun HomeContent(data: HomeData, goTo: (Screen) -> Unit, onRequestExpired: () -> Unit) {
-    val request = data.newRequest
+    // Offline nurses don't receive requests, so an open one is hidden until they go online again.
+    val offline = NurseStatus.online.collectAsState().value == false
+    val request = data.newRequest.takeUnless { offline }
     if (request != null) {
         NewRequestCard(request, onView = { goTo(Screen.Requests) }, onExpired = onRequestExpired, modifier = Modifier.enterUp(1))
     } else {
         HomeMessage(
-            "No new requests right now. We'll let you know when one comes in.",
+            if (offline) OFFLINE_MESSAGE else "No new requests right now. We'll let you know when one comes in.",
             Modifier.padding(horizontal = 20.dp).padding(top = 24.dp).enterUp(1),
         )
     }
@@ -570,6 +577,7 @@ fun RequestsScreen() {
     var decision by remember { mutableStateOf<Decision?>(null) }
     val incoming by RequestRealtime.changes.collectAsState()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     LaunchedEffect(reload, incoming) {
         error = null
@@ -581,9 +589,9 @@ fun RequestsScreen() {
             error = "Couldn't load your requests. Please try again."
         }
     }
-    // Backup for realtime: re-check open requests so ones cancelled on the website don't linger.
-    LaunchedEffect(data) {
-        if (data?.pending?.isNotEmpty() == true) {
+    // Backup for realtime: re-check regularly so new requests appear, and ones cancelled on the website go, even if a live update is missed.
+    LaunchedEffect(Unit) {
+        while (true) {
             delay(REQUEST_RECHECK_MS)
             if (busyId == null) reload++
         }
@@ -596,6 +604,8 @@ fun RequestsScreen() {
         scope.launch {
             try {
                 if (accept) RequestsRepository.accept(booking) else RequestsRepository.decline(booking)
+                // Answered: stop its alert and the pending last-minute reminder.
+                IncomingRequestAlert.dismiss(context, booking.id)
                 decision = Decision(accept, booking.serviceName)
             } catch (e: AuthException) {
                 actionError = booking.id to (e.message ?: "Something went wrong.")
@@ -608,7 +618,9 @@ fun RequestsScreen() {
         }
     }
 
-    val pending = data?.pending.orEmpty()
+    // Offline nurses don't receive requests, so open ones are hidden until they go online again.
+    val offline = NurseStatus.online.collectAsState().value == false
+    val pending = if (offline) emptyList() else data?.pending.orEmpty()
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(top = 12.dp)
     ) {
@@ -647,14 +659,14 @@ fun RequestsScreen() {
                 ) { result ->
                     if (result != null) {
                         DecisionResult(result, onDone = { decision = null })
-                    } else if (loaded.pending.isEmpty()) {
+                    } else if (pending.isEmpty()) {
                         HomeMessage(
-                            "No new requests right now. We'll alert you as soon as a client books.",
+                            if (offline) OFFLINE_MESSAGE else "No new requests right now. We'll alert you as soon as a client books.",
                             Modifier.padding(top = 20.dp),
                         )
                     } else {
                         Column {
-                            loaded.pending.forEach { booking ->
+                            pending.forEach { booking ->
                                 PendingRequestCard(
                                     booking = booking,
                                     busy = busyId == booking.id,
@@ -789,7 +801,7 @@ private fun PendingRequestCard(
             Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 SecondaryButton("Decline", Icons.Rounded.Close, { if (!busy) onDecline() }, Modifier.weight(1f))
                 PrimaryButton(
-                    "Accept request", { if (!busy && secondsLeft > 0) onAccept() }, Modifier.weight(1.7f), height = 50.dp,
+                    "Accept", { if (!busy && secondsLeft > 0) onAccept() }, Modifier.weight(1f), height = 50.dp,
                     leading = Icons.Rounded.Check, loading = busy,
                 )
             }

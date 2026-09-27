@@ -7,6 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.nursecenter.nurse.data.ChatAlert
+import com.nursecenter.nurse.data.RequestRealtime
 import com.nursecenter.nurse.ui.NurseApp
 import com.nursecenter.nurse.ui.theme.NurseTheme
 
@@ -32,6 +33,8 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         ChatAlert.appVisible = true
+        // The live connection may have dropped while the app was in the background: catch up at once.
+        RequestRealtime.refresh()
     }
 
     override fun onStop() {

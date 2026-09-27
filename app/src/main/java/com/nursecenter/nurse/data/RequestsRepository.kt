@@ -100,7 +100,15 @@ object RequestsRepository {
         }
         if (code == 401) throw AuthException("Your session has expired. Please sign in again.")
         if (code == 403) throw AuthException("You don't have permission to respond to this request.")
-        if (code !in 200..299) throw AuthException("Couldn't update the request ($code). Please try again.")
+        if (code !in 200..299) {
+            android.util.Log.w("RequestsRepository", "$method $path failed ($code): $response")
+            val error = runCatching { JSONObject(response) }.getOrNull()
+            // 23P01: the no_caregiver_double_booking constraint (migration 011).
+            if (error?.optString("code") == "23P01") {
+                throw AuthException("This request overlaps a booking you've already accepted.")
+            }
+            throw AuthException("Couldn't update the request ($code). Please try again.")
+        }
         return response.ifBlank { "[]" }
     }
 

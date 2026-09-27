@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "169181426203",
+    "project_id": "nursecenter-fff10",
+    "storage_bucket": "nursecenter-fff10.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:169181426203:android:e83bb9703c2bdb29febebe",
+        "android_client_info": {
+          "package_name": "com.nursecenter.nurse"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCAzDLSkAgXrIxL8hcJJ5RjQCE6t4_OfhE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:169181426203:android:e8b6cfb32723db67febebe",
+        "android_client_info": {
+          "package_name": "com.nursecenter.nursecenterapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCAzDLSkAgXrIxL8hcJJ5RjQCE6t4_OfhE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

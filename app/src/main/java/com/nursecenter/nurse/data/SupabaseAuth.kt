@@ -48,7 +48,19 @@ object SupabaseAuth {
             runCatching { post("/auth/v1/logout", "{}", bearer = signedIn.accessToken) }
             throw AuthException("This app is for Nurse Center nurses only. Please use a nurse account.")
         }
-        signedIn.also { session = it }
+        signedIn.also {
+            session = it
+            SessionStore.save(it)
+        }
+    }
+
+    /**
+     * Loads the session saved on this device by an earlier sign-in, so the nurse stays signed in after
+     * the app is closed. Call once at startup; the token is refreshed on first use by [validSession].
+     */
+    fun restore(context: android.content.Context) {
+        SessionStore.init(context)
+        if (session == null) session = SessionStore.load()
     }
 
     /** Only accounts whose profile role is `caregiver` (and not deleted) may use the nurse app. */
@@ -75,10 +87,20 @@ object SupabaseAuth {
                 throw AuthException("Can't reach the server. Check your internet connection.")
             }
             if (code !in 200..299) {
-                if (session === current) session = null
+                // Rejected refresh token (signed out elsewhere, password changed, account removed): forget it.
+                if (session === current) {
+                    session = null
+                    SessionStore.clear()
+                }
                 throw AuthException("Your session has expired. Please sign in again.")
             }
-            parseSession(JSONObject(response)).also { if (session === current) session = it }
+            // Refresh tokens are single-use, so the new one must replace the saved one.
+            parseSession(JSONObject(response)).also {
+                if (session === current) {
+                    session = it
+                    SessionStore.save(it)
+                }
+            }
         }
     }
 
@@ -98,6 +120,7 @@ object SupabaseAuth {
     suspend fun signOut() {
         val token = session?.accessToken
         session = null
+        SessionStore.clear()
         if (token != null) withContext(Dispatchers.IO) {
             runCatching { post("/auth/v1/logout", "{}", bearer = token) }
         }
@@ -129,6 +152,26 @@ object SupabaseAuth {
             return response.code to response.body?.string().orEmpty()
         }
     }
+
+    /** Blocking upload of raw bytes (e.g. a file to Supabase Storage); returns the status code and response body. */
+    internal fun upload(path: String, bytes: ByteArray, contentType: String, bearer: String, headers: Map<String, String> = emptyMap()): Pair<Int, String> {
+        val builder = Request.Builder()
+            .url(BuildConfig.SUPABASE_URL.trimEnd('/') + path)
+            .header("apikey", BuildConfig.SUPABASE_ANON_KEY)
+            .header("Authorization", "Bearer $bearer")
+            .post(bytes.toRequestBody(contentType.toMediaType()))
+        headers.forEach { (name, value) -> builder.header(name, value) }
+        uploadHttp.newCall(builder.build()).execute().use { response ->
+            return response.code to response.body?.string().orEmpty()
+        }
+    }
+
+    // Longer write timeout than [http] for multi-megabyte documents on mobile data.
+    private val uploadHttp = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .build()
 
     private fun errorMessage(json: JSONObject, code: Int): String {
         val raw = json.optString("msg").ifBlank { json.optString("error_description") }.ifBlank { json.optString("message") }

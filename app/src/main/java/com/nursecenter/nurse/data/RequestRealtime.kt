@@ -40,7 +40,8 @@ object RequestRealtime {
     private const val ALERTS_TOPIC = "realtime:nurse-job-alerts"
     private const val MESSAGES_TOPIC = "realtime:nurse-messages"
     private const val STATUS_TOPIC = "realtime:nurse-status"
-    private val TOPICS = listOf(BOOKINGS_TOPIC, ALERTS_TOPIC, MESSAGES_TOPIC, STATUS_TOPIC)
+    private const val SUPPORT_TOPIC = "realtime:nurse-support"
+    private val TOPICS = listOf(BOOKINGS_TOPIC, ALERTS_TOPIC, MESSAGES_TOPIC, STATUS_TOPIC, SUPPORT_TOPIC)
 
     private val _changes = MutableStateFlow(0)
     /** Increments whenever a request arrives or is closed (cancelled, declined, taken); screens observe it to refresh. */
@@ -70,6 +71,8 @@ object RequestRealtime {
         synchronized(closed) { closed.clear() }
         ChatAlert.reset()
         NurseStatus.clear()
+        IncomingRequestAlert.cancelReminders()
+        SupportRepository.reset()
     }
 
     private suspend fun CoroutineScope.connectLoop(context: Context) {
@@ -136,6 +139,18 @@ object RequestRealtime {
         )
         .put("access_token", token)
 
+    /**
+     * A new request delivered by push (works while the app is closed). Shares [raise] with Realtime, so a
+     * request that arrives both ways only alerts once. The push is sent as the request is created, so the
+     * response window starts now.
+     */
+    fun onPush(context: Context, bookingId: String) = raise(context.applicationContext, bookingId, sentAt = null)
+
+    /** Asks screens to reload, e.g. when the app comes back to the foreground and live updates may have been missed. */
+    fun refresh() {
+        _changes.value++
+    }
+
     /** @param sentAt the record's `created_at`, which starts the nurse's response window. */
     private fun raise(context: Context, bookingId: String, sentAt: String?) {
         val start = sentAt?.let { runCatching { OffsetDateTime.parse(it).toInstant().toEpochMilli() }.getOrNull() }
@@ -189,6 +204,8 @@ object RequestRealtime {
             webSocket.send(message(MESSAGES_TOPIC, "phx_join", joinPayload("messages", listOf("INSERT"), null, token)))
             // Online/Offline changes made on the website.
             webSocket.send(message(STATUS_TOPIC, "phx_join", joinPayload("caregiver_profiles", listOf("UPDATE"), "id=eq.$userId", token)))
+            // Support replies; RLS limits delivery to the nurse's own support thread.
+            webSocket.send(message(SUPPORT_TOPIC, "phx_join", joinPayload("support_messages", listOf("INSERT"), null, token)))
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -196,7 +213,12 @@ object RequestRealtime {
             val payload = msg.optJSONObject("payload") ?: return
             when (msg.optString("event")) {
                 "phx_reply" -> if (payload.optString("status") == "ok") {
-                    if (msg.optString("topic") != "phoenix") onConnected()
+                    val topic = msg.optString("topic")
+                    // Heartbeats reply on "phoenix"; a reply with a response is a channel join.
+                    if (topic != "phoenix" && payload.optJSONObject("response")?.has("postgres_changes") == true) {
+                        Log.i(TAG, "Joined $topic")
+                    }
+                    if (topic != "phoenix") onConnected()
                 } else {
                     Log.w(TAG, "Join failed on ${msg.optString("topic")}: $payload")
                 }
@@ -236,6 +258,11 @@ object RequestRealtime {
                             },
                         )
                     }
+                }
+                "support_messages" -> if (type == "INSERT") {
+                    val message = runCatching { SupportRepository.toMessage(record) }.getOrNull() ?: return
+                    _messages.tryEmit(message)
+                    if (!message.mine) ChatAlert.onIncoming(context, message, "Nurse Center Support")
                 }
                 "caregiver_profiles" -> if (record.has("is_available") && !record.isNull("is_available")) {
                     NurseStatus.onRemoteChange(record.getBoolean("is_available"))

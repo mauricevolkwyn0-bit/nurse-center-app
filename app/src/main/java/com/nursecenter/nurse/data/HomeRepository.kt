@@ -81,10 +81,11 @@ object HomeRepository {
                         "&scheduled_at=gte.${iso(monthStart)}&scheduled_at=lt.${iso(monthStart.plusMonths(1))}",
                 )
             }
+            // Only bookings the client has paid for: payment is held on their card ("authorized") or taken ("paid").
             val next = async {
                 getArray(
                     session,
-                    "/rest/v1/bookings?select=$BOOKING_FIELDS&$mine&status=eq.accepted" +
+                    "/rest/v1/bookings?select=$BOOKING_FIELDS&$mine&status=eq.accepted&payment_status=in.(authorized,paid)" +
                         "&scheduled_at=gte.${iso(now)}&order=scheduled_at.asc&limit=1",
                 )
             }
