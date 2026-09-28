@@ -1,5 +1,6 @@
 package com.nursecenter.nurse.data
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -31,6 +32,7 @@ data class ChatMessage(
 
 /** Reads and sends the nurse's client chats in the Supabase `conversations` and `messages` tables. */
 object ChatRepository {
+    private const val TAG = "ChatRepository"
     private const val MESSAGE_FIELDS = "id,conversation_id,sender_id,content,message_type,created_at"
     private val names = ConcurrentHashMap<String, String>()
 
@@ -115,16 +117,29 @@ object ChatRepository {
         toMessage(JSONArray(response).getJSONObject(0), session.userId)
     }
 
-    /** Marks the client's messages in the conversation as read. Best effort: failures are ignored. */
+    /** True when a client has sent the nurse a message they haven't read yet, in any conversation. */
+    suspend fun hasUnread(): Boolean = withContext(Dispatchers.IO) {
+        val session = SupabaseAuth.validSession()
+        val me = session.userId
+        val convos = HomeRepository.getArray(session, "/rest/v1/conversations?select=id&caregiver_id=eq.$me")
+        if (convos.length() == 0) return@withContext false
+        val ids = objects(convos).joinToString(",") { it.getString("id") }
+        HomeRepository.getArray(
+            session,
+            "/rest/v1/messages?select=id&conversation_id=in.($ids)&sender_id=neq.$me&read_at=is.null&deleted_at=is.null&limit=1",
+        ).length() > 0
+    }
+
+    /**
+     * Marks the client's messages in the conversation as read. Goes through the `mark_conversation_read`
+     * function (migration 033) because RLS only lets a message's sender update it. Best effort: failures are ignored.
+     */
     suspend fun markRead(conversationId: String) = withContext(Dispatchers.IO) {
         runCatching {
             val session = SupabaseAuth.validSession()
-            val body = JSONObject().put("read_at", OffsetDateTime.now().toString()).toString()
-            SupabaseAuth.request(
-                "PATCH",
-                "/rest/v1/messages?conversation_id=eq.$conversationId&sender_id=neq.${session.userId}&read_at=is.null",
-                body, session.accessToken,
-            )
+            val body = JSONObject().put("p_conversation_id", conversationId).toString()
+            val (code, _) = SupabaseAuth.request("POST", "/rest/v1/rpc/mark_conversation_read", body, session.accessToken)
+            if (code !in 200..299) Log.w(TAG, "mark_conversation_read failed ($code)")
         }
         Unit
     }

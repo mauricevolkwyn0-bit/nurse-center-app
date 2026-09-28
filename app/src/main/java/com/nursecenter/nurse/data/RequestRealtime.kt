@@ -70,6 +70,7 @@ object RequestRealtime {
         synchronized(alerted) { alerted.clear() }
         synchronized(closed) { closed.clear() }
         ChatAlert.reset()
+        ChatUnread.clear()
         NurseStatus.clear()
         IncomingRequestAlert.cancelReminders()
         SupportRepository.reset()
@@ -262,7 +263,10 @@ object RequestRealtime {
                 "support_messages" -> if (type == "INSERT") {
                     val message = runCatching { SupportRepository.toMessage(record) }.getOrNull() ?: return
                     _messages.tryEmit(message)
-                    if (!message.mine) ChatAlert.onIncoming(context, message, "Nurse Center Support")
+                    if (!message.mine) {
+                        ChatUnread.onIncoming(message)
+                        ChatAlert.onIncoming(context, message, "Nurse Center Support")
+                    }
                 }
                 "caregiver_profiles" -> if (record.has("is_available") && !record.isNull("is_available")) {
                     NurseStatus.onRemoteChange(record.getBoolean("is_available"))
@@ -270,8 +274,9 @@ object RequestRealtime {
                 "messages" -> if (type == "INSERT" && record.isNull("deleted_at")) {
                     val message = runCatching { ChatRepository.toMessage(record, userId) }.getOrNull() ?: return
                     _messages.tryEmit(message)
-                    if (!message.mine) scope.launch {
-                        ChatAlert.onIncoming(context, message, ChatRepository.senderName(message.senderId))
+                    if (!message.mine) {
+                        ChatUnread.onIncoming(message)
+                        scope.launch { ChatAlert.onIncoming(context, message, ChatRepository.senderName(message.senderId)) }
                     }
                 }
             }

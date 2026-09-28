@@ -82,6 +82,7 @@ import androidx.core.view.WindowCompat
 import com.nursecenter.nurse.R
 import com.nursecenter.nurse.data.AuthException
 import com.nursecenter.nurse.data.ChatAlert
+import com.nursecenter.nurse.data.ChatUnread
 import com.nursecenter.nurse.data.NurseStatus
 import com.nursecenter.nurse.data.PushTokens
 import com.nursecenter.nurse.data.SUPPORT_CHAT_ID
@@ -237,6 +238,10 @@ private fun MainShell(
         ChatAlert.requestedConversation.value = null
     }
 
+    // Rechecked on sign-in and whenever the app returns to the foreground (MainActivity bumps `changes`).
+    val changes by RequestRealtime.changes.collectAsState()
+    LaunchedEffect(changes) { ChatUnread.refresh() }
+
     Column(Modifier.fillMaxSize().background(NC.Background).statusBarsPadding().imePadding()) {
         AnimatedVisibility(
             visible = !active.isSubScreen && !inChat,
@@ -346,15 +351,17 @@ private fun BottomNav(active: Screen, onNavigate: (Screen) -> Unit) {
             .navigationBarsPadding()
             .padding(horizontal = 8.dp, vertical = 8.dp)
     ) {
+        val chatUnread by ChatUnread.any.collectAsState()
         navItems.forEach { item ->
             val selected = active == item.screen || (item.screen == Screen.More && active.isSubScreen)
-            NavButton(item, selected, Modifier.weight(1f)) { onNavigate(item.screen) }
+            val dot = item.screen == Screen.Requests || (item.screen == Screen.Messages && chatUnread)
+            NavButton(item, selected, dot, Modifier.weight(1f)) { onNavigate(item.screen) }
         }
     }
 }
 
 @Composable
-private fun NavButton(item: NavItem, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+private fun NavButton(item: NavItem, selected: Boolean, dot: Boolean, modifier: Modifier, onClick: () -> Unit) {
     val fg by animateColorAsState(if (selected) Color(0xFF148F8D) else Color(0xFF8B999F), tween(250), label = "navFg")
     val pill by animateColorAsState(if (selected) Color(0xFFE3F5F2) else Color.Transparent, tween(250), label = "navPill")
     val pillWidth by animateDpAsState(if (selected) 56.dp else 40.dp, spring(dampingRatio = 0.6f, stiffness = 500f), label = "navWidth")
@@ -369,7 +376,7 @@ private fun NavButton(item: NavItem, selected: Boolean, modifier: Modifier, onCl
                 if (selected) item.selectedIcon else item.icon, null, tint = fg,
                 modifier = Modifier.size(22.dp).graphicsLayer { scaleX = iconScale; scaleY = iconScale },
             )
-            if (item.screen == Screen.Requests) {
+            if (dot) {
                 Box(
                     Modifier.align(Alignment.TopEnd).padding(top = 2.dp, end = (pillWidth - 40.dp) / 2 + 7.dp)
                         .size(9.dp).background(Color.White, CircleShape).padding(2.dp).background(Color(0xFFEF918B), CircleShape)

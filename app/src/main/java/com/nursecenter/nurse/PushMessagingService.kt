@@ -3,16 +3,21 @@ package com.nursecenter.nurse
 import android.util.Log
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import com.nursecenter.nurse.data.ChatAlert
+import com.nursecenter.nurse.data.ChatMessage
+import com.nursecenter.nurse.data.ChatUnread
 import com.nursecenter.nurse.data.PushTokens
 import com.nursecenter.nurse.data.RequestRealtime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.time.ZonedDateTime
 
 /**
  * Receives Firebase pushes, which arrive even when the app is closed. The website sends a data-only
- * `new_booking` message (see nurse-center `app/api/push/notify/route.ts`); it raises the same alert as Realtime.
+ * `new_booking` message (see nurse-center `app/api/push/notify/route.ts`) or `new_message` message
+ * (`app/api/push/message/route.ts`); each raises the same alert as Realtime.
  */
 class PushMessagingService : FirebaseMessagingService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -22,7 +27,24 @@ class PushMessagingService : FirebaseMessagingService() {
         Log.i(TAG, "Push received: type=${data["type"]}")
         when (data["type"]) {
             "new_booking" -> data["booking_id"]?.takeIf { it.isNotBlank() }?.let { RequestRealtime.onPush(applicationContext, it) }
+            "new_message" -> onChatMessage(data)
         }
+    }
+
+    /** Sent by `app/api/push/message/route.ts` for each new chat message; the body is already a preview. */
+    private fun onChatMessage(data: Map<String, String>) {
+        val conversationId = data["conversation_id"]?.takeIf { it.isNotBlank() } ?: return
+        val message = ChatMessage(
+            // Same ID as the Realtime copy, so ChatAlert doesn't list the message twice when both arrive
+            id = data["message_id"] ?: "push-${System.currentTimeMillis()}",
+            conversationId = conversationId,
+            senderId = data["sender_id"].orEmpty(),
+            text = data["body"] ?: "Sent you a message",
+            createdAt = ZonedDateTime.now(),
+            mine = false,
+        )
+        ChatUnread.onIncoming(message)
+        ChatAlert.onIncoming(applicationContext, message, data["title"])
     }
 
     override fun onNewToken(token: String) {

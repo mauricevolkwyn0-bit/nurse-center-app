@@ -58,6 +58,13 @@ object SupportRepository {
         toMessage(JSONArray(response).getJSONObject(0))
     }
 
+    /** True when support has replied and the nurse hasn't read it yet. */
+    suspend fun hasUnread(): Boolean = withContext(Dispatchers.IO) {
+        val session = SupabaseAuth.validSession()
+        val thread = existingThread(session) ?: return@withContext false
+        get(session, "/rest/v1/support_messages?select=id&thread_id=eq.$thread&from_staff=is.true&read_at=is.null&limit=1").length() > 0
+    }
+
     /** Marks support's replies as read. Best effort. */
     suspend fun markRead() = withContext(Dispatchers.IO) {
         runCatching {

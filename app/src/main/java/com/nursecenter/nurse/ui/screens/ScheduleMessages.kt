@@ -94,6 +94,7 @@ import com.nursecenter.nurse.data.ChatAlert
 import com.nursecenter.nurse.data.ChatMessage
 import com.nursecenter.nurse.data.ChatRepository
 import com.nursecenter.nurse.data.ChatThread
+import com.nursecenter.nurse.data.ChatUnread
 import com.nursecenter.nurse.data.NurseStatus
 import com.nursecenter.nurse.data.RequestRealtime
 import com.nursecenter.nurse.data.ScheduleRepository
@@ -691,7 +692,10 @@ private fun ChatView(conversationId: String, thread: ChatThread?, onBack: () -> 
     var sending by remember { mutableStateOf(false) }
     // The support chat lives in its own tables; client chats in conversations/messages.
     val support = conversationId == SUPPORT_CHAT_ID
-    suspend fun markRead() = if (support) SupportRepository.markRead() else ChatRepository.markRead(conversationId)
+    suspend fun markRead() {
+        if (support) SupportRepository.markRead() else ChatRepository.markRead(conversationId)
+        ChatUnread.refresh()
+    }
 
     // No notifications for this conversation while it's on screen; clear any already showing.
     DisposableEffect(conversationId) {
