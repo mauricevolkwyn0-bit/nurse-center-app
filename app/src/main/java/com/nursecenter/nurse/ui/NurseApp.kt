@@ -83,16 +83,19 @@ import com.nursecenter.nurse.R
 import com.nursecenter.nurse.data.AuthException
 import com.nursecenter.nurse.data.ChatAlert
 import com.nursecenter.nurse.data.ChatUnread
+import com.nursecenter.nurse.data.NotificationsRepository
 import com.nursecenter.nurse.data.NurseStatus
 import com.nursecenter.nurse.data.PushTokens
 import com.nursecenter.nurse.data.SUPPORT_CHAT_ID
 import com.nursecenter.nurse.data.RequestRealtime
+import com.nursecenter.nurse.data.RequestsRepository
 import com.nursecenter.nurse.data.SupabaseAuth
 import com.nursecenter.nurse.ui.screens.DocumentsScreen
 import com.nursecenter.nurse.ui.screens.HomeScreen
 import com.nursecenter.nurse.ui.screens.LoginScreen
 import com.nursecenter.nurse.ui.screens.MessagesScreen
 import com.nursecenter.nurse.ui.screens.MoreScreen
+import com.nursecenter.nurse.ui.screens.NotificationsScreen
 import com.nursecenter.nurse.ui.screens.ProfileScreen
 import com.nursecenter.nurse.ui.screens.RequestsScreen
 import com.nursecenter.nurse.ui.screens.ReviewsScreen
@@ -224,6 +227,7 @@ private fun MainShell(
     BackHandler(enabled = active != Screen.Home) {
         onNavigate(if (active.isSubScreen) Screen.More else Screen.Home)
     }
+    val hasPending by RequestsRepository.hasPending.collectAsState()
     val imeVisible = WindowInsets.isImeVisible
     var openChat by rememberSaveable { mutableStateOf<String?>(null) }
     // An open conversation takes over the whole screen, like the sub-screens.
@@ -240,15 +244,26 @@ private fun MainShell(
 
     // Rechecked on sign-in and whenever the app returns to the foreground (MainActivity bumps `changes`).
     val changes by RequestRealtime.changes.collectAsState()
-    LaunchedEffect(changes) { ChatUnread.refresh() }
+    LaunchedEffect(changes) {
+        launch { ChatUnread.refresh() }
+        launch { RequestsRepository.refreshPending() }
+        launch { NotificationsRepository.refreshUnread() }
+    }
+    // Requests expire after their response window without any live event, so recheck while some are open.
+    LaunchedEffect(hasPending) {
+        while (hasPending) {
+            delay(60_000)
+            RequestsRepository.refreshPending()
+        }
+    }
 
     Column(Modifier.fillMaxSize().background(NC.Background).statusBarsPadding().imePadding()) {
         AnimatedVisibility(
-            visible = !active.isSubScreen && !inChat,
+            visible = !active.isDetail && !inChat,
             enter = expandVertically(tween(250)) + fadeIn(tween(250)),
             exit = shrinkVertically(tween(220)) + fadeOut(tween(150)),
         ) {
-            AppHeader(online, statusBusy, onOnlineChange, onReloadStatus)
+            AppHeader(online, statusBusy, onOnlineChange, onReloadStatus, onNotifications = { onNavigate(Screen.Notifications) })
         }
         Box(Modifier.weight(1f)) {
             AnimatedContent(
@@ -266,6 +281,7 @@ private fun MainShell(
                     Screen.Profile -> ProfileScreen(back = { onNavigate(Screen.More) })
                     Screen.Documents -> DocumentsScreen(back = { onNavigate(Screen.More) })
                     Screen.Reviews -> ReviewsScreen(back = { onNavigate(Screen.More) })
+                    Screen.Notifications -> NotificationsScreen(back = { onNavigate(Screen.Home) })
                     Screen.Support -> SupportScreen(
                         back = { onNavigate(Screen.More) },
                         onStartChat = { openChat = SUPPORT_CHAT_ID; onNavigate(Screen.Messages) },
@@ -286,8 +302,14 @@ private fun MainShell(
 }
 
 @Composable
-private fun AppHeader(online: Boolean?, statusBusy: Boolean, onOnlineChange: (Boolean) -> Unit, onReloadStatus: () -> Unit) {
-    val soon = rememberComingSoon()
+private fun AppHeader(
+    online: Boolean?,
+    statusBusy: Boolean,
+    onOnlineChange: (Boolean) -> Unit,
+    onReloadStatus: () -> Unit,
+    onNotifications: () -> Unit,
+) {
+    val unread by NotificationsRepository.hasUnread.collectAsState()
     Row(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -297,7 +319,7 @@ private fun AppHeader(online: Boolean?, statusBusy: Boolean, onOnlineChange: (Bo
             Txt("NURSECENTER", 10, Color(0xFF91A0A6), weight = FontWeight.Bold, spacing = 0.15f)
             Txt("Nurse Portal", 14, Color(0xFF233643), weight = FontWeight.Bold)
         }
-        IconBtn(Icons.Outlined.Notifications, "Notifications", { soon("Notifications") }, badge = true)
+        IconBtn(Icons.Outlined.Notifications, "Notifications", onNotifications, badge = unread)
         Spacer(Modifier.width(8.dp))
         OnlineToggle(online, statusBusy, onOnlineChange, onRetry = onReloadStatus)
     }
@@ -352,9 +374,10 @@ private fun BottomNav(active: Screen, onNavigate: (Screen) -> Unit) {
             .padding(horizontal = 8.dp, vertical = 8.dp)
     ) {
         val chatUnread by ChatUnread.any.collectAsState()
+        val hasPending by RequestsRepository.hasPending.collectAsState()
         navItems.forEach { item ->
             val selected = active == item.screen || (item.screen == Screen.More && active.isSubScreen)
-            val dot = item.screen == Screen.Requests || (item.screen == Screen.Messages && chatUnread)
+            val dot = (item.screen == Screen.Requests && hasPending) || (item.screen == Screen.Messages && chatUnread)
             NavButton(item, selected, dot, Modifier.weight(1f)) { onNavigate(item.screen) }
         }
     }

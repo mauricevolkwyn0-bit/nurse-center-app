@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -44,11 +46,17 @@ import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.HeadsetMic
+import androidx.compose.material.icons.outlined.Business
+import androidx.compose.material.icons.outlined.EventAvailable
+import androidx.compose.material.icons.outlined.EventBusy
+import androidx.compose.material.icons.outlined.NotificationsNone
 import androidx.compose.material.icons.outlined.Phone
+import androidx.compose.material.icons.outlined.Place
 import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material.icons.outlined.TaskAlt
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.CircularProgressIndicator
@@ -81,11 +89,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nursecenter.nurse.BuildConfig
 import com.nursecenter.nurse.data.AccountSummary
+import com.nursecenter.nurse.data.AppNotification
 import com.nursecenter.nurse.data.AuthException
+import com.nursecenter.nurse.data.NotificationsRepository
 import com.nursecenter.nurse.data.DocumentSlot
 import com.nursecenter.nurse.data.DocumentsRepository
 import com.nursecenter.nurse.data.MoreRepository
 import com.nursecenter.nurse.data.NurseProfile
+import com.nursecenter.nurse.data.Place
+import com.nursecenter.nurse.data.PlaceSuggestion
 import com.nursecenter.nurse.data.ProfileRepository
 import com.nursecenter.nurse.data.RequestRealtime
 import com.nursecenter.nurse.data.Review
@@ -103,6 +115,7 @@ import com.nursecenter.nurse.ui.IconBtn
 import com.nursecenter.nurse.ui.IconTile
 import com.nursecenter.nurse.ui.NcSheet
 import com.nursecenter.nurse.ui.PageTitle
+import com.nursecenter.nurse.ui.PrimaryButton
 import com.nursecenter.nurse.ui.RemoteImage
 import com.nursecenter.nurse.ui.SecondaryButton
 import com.nursecenter.nurse.ui.SectionTitle
@@ -115,6 +128,7 @@ import com.nursecenter.nurse.ui.rand
 import com.nursecenter.nurse.ui.rememberComingSoon
 import com.nursecenter.nurse.ui.theme.Jakarta
 import com.nursecenter.nurse.ui.theme.NC
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -275,6 +289,92 @@ fun SubScreen(
 
 
 @Composable
+fun NotificationsScreen(back: () -> Unit) {
+    var items by remember { mutableStateOf<List<AppNotification>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var reload by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(reload) {
+        error = null
+        try {
+            items = NotificationsRepository.load()
+            // Unread ones stay highlighted on this visit; they're marked read for next time and the bell's dot clears.
+            NotificationsRepository.markAllRead()
+        } catch (e: AuthException) {
+            error = e.message
+        } catch (e: Exception) {
+            error = "Couldn't load your notifications. Please try again."
+        }
+    }
+
+    SubScreen("Notifications", "Updates about your bookings and account", back) {
+        val list = items
+        when {
+            list == null && error != null -> ErrorNote(error!!, Modifier.padding(20.dp)) { reload++ }
+            list == null -> Box(Modifier.fillMaxWidth().padding(vertical = 60.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = NC.Teal, strokeWidth = 3.dp, modifier = Modifier.size(28.dp))
+            }
+            list.isEmpty() -> Column(
+                Modifier.enterUp(0).fillMaxWidth().padding(horizontal = 40.dp, vertical = 60.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Icon(Icons.Outlined.NotificationsNone, null, tint = Color(0xFFA4AFB3), modifier = Modifier.size(32.dp))
+                Txt("No notifications yet", 15, Color(0xFF34474F), Modifier.padding(top = 12.dp), weight = FontWeight.Bold)
+                Txt(
+                    "Booking updates and messages from Nurse Center will appear here.", 12, Color(0xFF8B999F),
+                    Modifier.padding(top = 6.dp), align = TextAlign.Center, lineHeight = 18,
+                )
+            }
+            else -> Column(
+                Modifier.padding(horizontal = 20.dp).padding(top = 8.dp, bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                list.forEachIndexed { i, n -> NotificationRow(n, Modifier.enterUp(minOf(i, 6))) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotificationRow(n: AppNotification, modifier: Modifier = Modifier) {
+    val (icon, tint, bg) = when {
+        n.type.endsWith("cancelled") -> Triple(Icons.Outlined.EventBusy, Color(0xFFC6564C), Color(0xFFFDECEA))
+        n.type.startsWith("booking") -> Triple(Icons.Outlined.EventAvailable, Color(0xFF1C9792), Color(0xFFE8F7F4))
+        n.type.startsWith("agency") -> Triple(Icons.Outlined.Business, Color(0xFF7C3AED), Color(0xFFEFE9FD))
+        else -> Triple(Icons.Outlined.NotificationsNone, Color(0xFF5E7079), Color(0xFFEFF3F3))
+    }
+    val shape = RoundedCornerShape(18.dp)
+    Row(
+        modifier.fillMaxWidth().background(if (n.read) Color.White else Color(0xFFF0FAF8), shape)
+            .border(1.dp, if (n.read) Color(0xFFE6ECEC) else Color(0xFFBFE6E0), shape).padding(14.dp),
+    ) {
+        IconTile(icon, background = bg, tint = tint, size = 38.dp, iconSize = 18.dp)
+        Column(Modifier.weight(1f).padding(start = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Txt(n.title, 13, Color(0xFF2C3F49), Modifier.weight(1f), weight = FontWeight.Bold)
+                Txt(timeAgo(n.createdAt), 11, Color(0xFF97A4A9), Modifier.padding(start = 8.dp))
+            }
+            n.body?.let { Txt(it, 12, Color(0xFF6E7F86), Modifier.padding(top = 4.dp), lineHeight = 17) }
+        }
+        if (!n.read) Box(Modifier.padding(start = 8.dp, top = 4.dp).size(8.dp).background(Color(0xFF1DA5A3), CircleShape))
+    }
+}
+
+/** "Just now", "5 min ago", "3 h ago", "Yesterday", then the date. */
+private fun timeAgo(at: java.time.ZonedDateTime): String {
+    val now = java.time.ZonedDateTime.now(at.zone)
+    val minutes = java.time.Duration.between(at, now).toMinutes()
+    return when {
+        minutes < 1 -> "Just now"
+        minutes < 60 -> "$minutes min ago"
+        at.toLocalDate() == now.toLocalDate() -> "${minutes / 60} h ago"
+        at.toLocalDate() == now.toLocalDate().minusDays(1) -> "Yesterday"
+        at.year == now.year -> at.format(DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH))
+        else -> at.format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH))
+    }
+}
+
+@Composable
 fun WalletScreen(back: () -> Unit) {
     var wallet by remember { mutableStateOf<WalletData?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -369,7 +469,9 @@ fun WalletScreen(back: () -> Unit) {
 private fun monthTrend(w: WalletData?): Pair<String, Color> {
     if (w == null) return " " to NC.Muted
     val lastMonth = LocalDate.now().minusMonths(1).month.getDisplayName(java.time.format.TextStyle.FULL, Locale.ENGLISH)
-    if (w.lastMonth <= 0.0) return "No earnings in $lastMonth" to Color(0xFF94A0A5)
+    if (w.lastMonth <= 0.0) {
+        return if (w.thisMonth > 0.0) "Up from R 0 in $lastMonth" to NC.Success else "No earnings yet this month" to Color(0xFF94A0A5)
+    }
     val change = ((w.thisMonth - w.lastMonth) / w.lastMonth * 100).roundToInt()
     return when {
         change > 0 -> "+$change% from $lastMonth" to NC.Success
@@ -396,7 +498,8 @@ private fun EarningRow(entry: WalletEntry) {
             )
         }
         Txt(
-            (if (entry.completed) "+ " else "") + rand(entry.payout.toFloat()), 13,
+            // Cents shown when there are any, so the rows add up to the total above.
+            (if (entry.completed) "+ " else "") + rand(entry.payout.toFloat(), cents = entry.payout % 1.0 != 0.0), 13,
             if (entry.completed) Color(0xFF239C76) else Color(0xFF94A0A5), weight = FontWeight.Bold,
         )
     }
@@ -415,6 +518,25 @@ fun ProfileScreen(back: () -> Unit) {
     var name by rememberSaveable { mutableStateOf("") }
     var experience by rememberSaveable { mutableStateOf("") }
     var bio by rememberSaveable { mutableStateOf("") }
+    var professions by remember { mutableStateOf(emptyList<String>()) }
+    var address by rememberSaveable { mutableStateOf("") }
+    // Set once the nurse picks a suggestion; a typed address without one can't be saved.
+    var place by remember { mutableStateOf<Place?>(null) }
+    var suggestions by remember { mutableStateOf(emptyList<PlaceSuggestion>()) }
+    // The new mobile number is only saved once its SMS code is verified, separately from Save.
+    var phone by rememberSaveable { mutableStateOf("") }
+    var codeToken by rememberSaveable { mutableStateOf<String?>(null) }
+    var code by rememberSaveable { mutableStateOf("") }
+    var phoneBusy by remember { mutableStateOf(false) }
+
+    LaunchedEffect(address, place, editing) {
+        if (!editing || place != null || address.trim().length < 3 || address == profile?.serviceArea) {
+            suggestions = emptyList()
+            return@LaunchedEffect
+        }
+        delay(350) // wait for typing to pause
+        suggestions = runCatching { ProfileRepository.searchPlaces(address.trim()) }.getOrDefault(emptyList())
+    }
 
     LaunchedEffect(reload) {
         error = null
@@ -429,19 +551,65 @@ fun ProfileScreen(back: () -> Unit) {
 
     fun toast(message: String) = Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
 
+    fun sendCode() {
+        if (phone.filter(Char::isDigit).length < 9) return toast("Please enter a valid mobile number.")
+        phoneBusy = true
+        scope.launch {
+            try {
+                codeToken = ProfileRepository.sendPhoneCode(phone.trim())
+                code = ""
+                toast("We've sent a 6-digit code to ${phone.trim()}")
+            } catch (e: Exception) {
+                toast((e as? AuthException)?.message ?: "Couldn't send the code. Please try again.")
+            } finally {
+                phoneBusy = false
+            }
+        }
+    }
+
+    fun verifyCode() {
+        val token = codeToken ?: return
+        if (code.length != 6) return toast("Please enter the 6-digit code.")
+        phoneBusy = true
+        scope.launch {
+            try {
+                val saved = ProfileRepository.verifyPhoneCode(token, code)
+                profile = profile?.copy(phone = saved)
+                phone = saved
+                codeToken = null
+                code = ""
+                toast("Mobile number verified")
+            } catch (e: Exception) {
+                toast((e as? AuthException)?.message ?: "Couldn't verify the code. Please try again.")
+            } finally {
+                phoneBusy = false
+            }
+        }
+    }
+
     fun save() {
+        val p = profile ?: return
         val trimmedName = name.trim()
         val years = experience.trim().toIntOrNull()
+        val addressChanged = address.trim() != p.serviceArea.orEmpty()
         when {
             trimmedName.isEmpty() -> toast("Please enter your full name.")
+            phone.trim() != p.phone.orEmpty() -> toast("Please verify your new mobile number first, or change it back.")
+            professions.isEmpty() -> toast("Please choose at least one profession.")
             experience.isNotBlank() && (years == null || years !in 0..70) -> toast("Years of experience must be a number from 0 to 70.")
+            addressChanged && place == null -> toast("Please choose your address from the suggestions.")
             else -> {
                 saving = true
                 val trimmedBio = bio.trim().ifEmpty { null }
+                val newPlace = place.takeIf { addressChanged }
+                val chosen = professions
                 scope.launch {
                     try {
-                        ProfileRepository.save(trimmedName, years, trimmedBio)
-                        profile = profile?.copy(fullName = trimmedName, yearsExperience = years, bio = trimmedBio)
+                        ProfileRepository.save(trimmedName, years, trimmedBio, chosen, newPlace)
+                        profile = profile?.copy(
+                            fullName = trimmedName, yearsExperience = years, bio = trimmedBio, professions = chosen,
+                            serviceArea = newPlace?.name ?: p.serviceArea,
+                        )
                         editing = false
                         toast("Profile saved")
                     } catch (e: Exception) {
@@ -461,7 +629,11 @@ fun ProfileScreen(back: () -> Unit) {
             {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (editing && !saving) {
-                        Txt("Cancel", 13, NC.Muted, Modifier.pressable(RoundedCornerShape(8.dp)) { editing = false }.padding(8.dp), weight = FontWeight.Bold)
+                        Txt(
+                            "Cancel", 13, NC.Muted,
+                            Modifier.pressable(RoundedCornerShape(8.dp)) { editing = false; codeToken = null }.padding(8.dp),
+                            weight = FontWeight.Bold,
+                        )
                     }
                     if (saving) {
                         CircularProgressIndicator(color = NC.Teal, strokeWidth = 2.dp, modifier = Modifier.padding(8.dp).size(18.dp))
@@ -475,6 +647,11 @@ fun ProfileScreen(back: () -> Unit) {
                                     name = p.fullName
                                     experience = p.yearsExperience?.toString().orEmpty()
                                     bio = p.bio.orEmpty()
+                                    professions = p.professions
+                                    address = p.serviceArea.orEmpty()
+                                    place = null
+                                    phone = p.phone.orEmpty()
+                                    codeToken = null
                                     editing = true
                                 }
                             }.padding(8.dp),
@@ -511,19 +688,50 @@ fun ProfileScreen(back: () -> Unit) {
                 ) {
                     ProfileField("Full name", shownName, editing) { name = it }
                     ProfileField("Email address", p.email, editing, editable = false)
-                    ProfileField("Mobile number", p.phone ?: "Not added", editing, editable = false)
-                    ProfileField("Profession", p.specialty ?: p.qualification ?: "Not set", editing, editable = false)
+                    if (editing) {
+                        PhoneEditor(
+                            phone = phone, savedPhone = p.phone.orEmpty(), codeSent = codeToken != null, code = code, busy = phoneBusy,
+                            onPhone = { phone = it; codeToken = null }, onCode = { code = it.filter(Char::isDigit).take(6) },
+                            onSend = ::sendCode, onVerify = ::verifyCode,
+                        )
+                        ProfessionField(professions) { item ->
+                            professions = if (item in professions) professions - item else professions + item
+                        }
+                    } else {
+                        ProfileField("Mobile number", p.phone ?: "Not added", editing = false)
+                        ProfileField(
+                            if (p.professions.size > 1) "Professions" else "Profession",
+                            p.professions.joinToString(", ").ifEmpty { p.qualification ?: "Not set" }, editing = false,
+                        )
+                    }
                     ProfileField(
                         "Years of experience", if (editing) experience else p.yearsExperience?.toString() ?: "Not set", editing,
                         keyboardType = KeyboardType.Number,
                     ) { experience = it.filter(Char::isDigit).take(2) }
                     ProfileField("About you", if (editing) bio else p.bio ?: "Not set", editing, singleLine = false) { bio = it }
-                    ProfileField("Service area", p.serviceArea ?: "Not set", editing, editable = false)
+                    Column {
+                        // Suggestions sit above the field so the keyboard doesn't cover them.
+                        AnimatedVisibility(editing && suggestions.isNotEmpty(), enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                            AddressSuggestions(suggestions) { picked ->
+                                suggestions = emptyList()
+                                scope.launch {
+                                    try {
+                                        val chosen = ProfileRepository.placeDetails(picked)
+                                        place = chosen
+                                        address = chosen.name
+                                    } catch (e: Exception) {
+                                        toast((e as? AuthException)?.message ?: "Couldn't look up that address. Please try another.")
+                                    }
+                                }
+                            }
+                        }
+                        ProfileField(
+                            "Home address / Service area", if (editing) address else p.serviceArea ?: "Not set", editing,
+                            placeholder = "Start typing your address",
+                        ) { address = it; place = null }
+                    }
                     if (editing) {
-                        Txt(
-                            "Your email, mobile number, profession and service area can be changed on the Nurse Center website.",
-                            11, Color(0xFF909CA1), lineHeight = 16,
-                        )
+                        Txt("Your email address can't be changed.", 11, Color(0xFF909CA1), lineHeight = 16)
                     }
                 }
             }
@@ -559,6 +767,7 @@ private fun ProfileField(
     editable: Boolean = true,
     singleLine: Boolean = true,
     keyboardType: KeyboardType = KeyboardType.Text,
+    placeholder: String? = null,
     onChange: (String) -> Unit = {},
 ) {
     val active = editing && editable
@@ -583,9 +792,133 @@ private fun ProfileField(
                     Modifier.fillMaxWidth().heightIn(min = if (singleLine) 48.dp else 96.dp).background(bg, shape).border(1.dp, border, shape)
                         .padding(horizontal = 16.dp, vertical = 14.dp),
                     contentAlignment = if (singleLine) Alignment.CenterStart else Alignment.TopStart,
-                ) { inner() }
+                ) {
+                    if (active && value.isEmpty() && placeholder != null) Txt(placeholder, 13, Color(0xFFA9B5B9))
+                    inner()
+                }
             },
         )
+    }
+}
+
+/** The mobile number while editing: a changed number gets an SMS code, and is saved once the code is verified. */
+@Composable
+private fun PhoneEditor(
+    phone: String,
+    savedPhone: String,
+    codeSent: Boolean,
+    code: String,
+    busy: Boolean,
+    onPhone: (String) -> Unit,
+    onCode: (String) -> Unit,
+    onSend: () -> Unit,
+    onVerify: () -> Unit,
+) {
+    val changed = phone.trim() != savedPhone
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        ProfileField("Mobile number", phone, editing = true, keyboardType = KeyboardType.Phone, placeholder = "e.g. 082 123 4567", onChange = onPhone)
+        AnimatedVisibility(changed, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (codeSent) {
+                    ProfileField(
+                        "Verification code", code, editing = true, keyboardType = KeyboardType.NumberPassword,
+                        placeholder = "6-digit code from the SMS", onChange = onCode,
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        PrimaryButton("Verify number", onVerify, Modifier.weight(1f), height = 46.dp, loading = busy)
+                        Txt(
+                            "Resend", 13, NC.TealText,
+                            Modifier.padding(start = 8.dp).pressable(RoundedCornerShape(8.dp), enabled = !busy, onClick = onSend).padding(10.dp),
+                            weight = FontWeight.Bold,
+                        )
+                    }
+                } else {
+                    Txt("We'll text a code to this number to confirm it's yours.", 11, Color(0xFF909CA1), lineHeight = 16)
+                    PrimaryButton("Send verification code", onSend, Modifier.fillMaxWidth(), height = 46.dp, loading = busy)
+                }
+            }
+        }
+    }
+}
+
+/** Looks like the other fields; tapping it opens a sheet where the nurse chooses one or more professions. */
+@Composable
+private fun ProfessionField(selected: List<String>, onToggle: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(14.dp)
+    Column {
+        Txt("Professions", 12, Color(0xFF77888F), Modifier.padding(bottom = 8.dp), weight = FontWeight.Bold)
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 48.dp).pressable(shape, pressedScale = 0.99f) { open = true }
+                .background(Color.White, shape).border(1.dp, Color(0xFF62C5BD), shape)
+                .padding(start = 16.dp, end = 10.dp, top = 14.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (selected.isEmpty()) {
+                Txt("Choose your professions", 13, Color(0xFFA9B5B9), Modifier.weight(1f))
+            } else {
+                Txt(selected.joinToString(", "), 13, Color(0xFF243642), Modifier.weight(1f), weight = FontWeight.SemiBold, maxLines = 1)
+            }
+            Icon(Icons.Rounded.KeyboardArrowDown, null, tint = Color(0xFF77888F), modifier = Modifier.size(20.dp))
+        }
+    }
+    if (open) {
+        NcSheet({ open = false }) {
+            // On short screens the chips scroll and Done stays at full size below them.
+            Column(Modifier.weight(1f, fill = false).padding(horizontal = 20.dp).padding(top = 24.dp, bottom = 20.dp)) {
+                Eyebrow("Your work")
+                Txt("Professions", 21, Color(0xFF253844), Modifier.padding(top = 4.dp), weight = FontWeight.Bold)
+                Txt("Choose all that apply. The first one you choose is shown as your main profession.", 12, Color(0xFF7D8C92), Modifier.padding(top = 8.dp), lineHeight = 18)
+                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                    ProfessionPicker(selected, onToggle)
+                }
+                PrimaryButton("Done", { open = false }, Modifier.padding(top = 20.dp).fillMaxWidth())
+            }
+        }
+    }
+}
+
+/** Every profession as a chip, grouped like the website; the nurse can choose several. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ProfessionPicker(selected: List<String>, onToggle: (String) -> Unit) {
+    Column {
+        ProfileRepository.PROFESSIONS.forEach { (group, items) ->
+            Txt(group, 12, Color(0xFF53666F), Modifier.padding(top = 18.dp, bottom = 8.dp), weight = FontWeight.Bold)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items.forEach { item ->
+                    val on = item in selected
+                    val bg by animateColorAsState(if (on) Color(0xFF1DA5A3) else Color.White, label = "professionChip")
+                    val shape = RoundedCornerShape(50)
+                    Txt(
+                        item, 12, if (on) Color.White else Color(0xFF4B5E67),
+                        Modifier.pressable(shape, pressedScale = 0.94f) { onToggle(item) }
+                            .background(bg, shape).border(1.dp, if (on) Color.Transparent else Color(0xFFDCE6E6), shape)
+                            .padding(horizontal = 14.dp, vertical = 9.dp),
+                        weight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Google address suggestions under the address field. */
+@Composable
+private fun AddressSuggestions(suggestions: List<PlaceSuggestion>, onPick: (PlaceSuggestion) -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    Column(Modifier.padding(bottom = 8.dp).fillMaxWidth().background(Color.White, shape).border(1.dp, Color(0xFFE1E8E8), shape)) {
+        suggestions.take(5).forEachIndexed { i, suggestion ->
+            if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFEEF2F2)))
+            Row(
+                Modifier.fillMaxWidth().pressable(RoundedCornerShape(0.dp), pressedScale = 1f) { onPick(suggestion) }
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Outlined.Place, null, tint = Color(0xFF1DA5A3), modifier = Modifier.size(18.dp))
+                Txt(suggestion.description, 12, Color(0xFF34474F), Modifier.padding(start = 10.dp), lineHeight = 17)
+            }
+        }
     }
 }
 

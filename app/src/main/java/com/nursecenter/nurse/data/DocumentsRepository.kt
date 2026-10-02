@@ -102,11 +102,10 @@ object DocumentsRepository {
         val session = SupabaseAuth.validSession()
         val me = session.userId
         coroutineScope {
-            val specialty = async {
+            val specialties = async {
                 runCatching {
-                    HomeRepository.getArray(session, "/rest/v1/caregiver_profiles?select=specialty&id=eq.$me")
-                        .optJSONObject(0)?.optStringOrNull("specialty")
-                }.getOrNull()
+                    ProfileRepository.professionsOf(HomeRepository.getArray(session, "/rest/v1/caregiver_profiles?select=*&id=eq.$me").optJSONObject(0))
+                }.getOrDefault(emptyList())
             }
             val rows = async {
                 HomeRepository.getArray(
@@ -124,8 +123,13 @@ object DocumentsRepository {
                     uploadedAt = OffsetDateTime.parse(json.getString("uploaded_at")).atZoneSameInstant(zone),
                 )
             }
-            val profession = specialty.await()?.let { SPECIALTY_TO_PROFESSION[it] }
-            val docs = UNIVERSAL + (profession?.let { BY_PROFESSION[it] } ?: DEFAULT)
+            // A nurse with several professions needs each one's documents; a type listed twice is
+            // shown once, with the first profession's wording, and is required if any profession requires it.
+            val byProfession = specialties.await().mapNotNull { SPECIALTY_TO_PROFESSION[it] }.distinct().flatMap { BY_PROFESSION.getValue(it) }
+            val merged = byProfession.groupBy { it.type }.values.map { same ->
+                same.first().let { Doc(it.type, it.label, same.any(Doc::required), it.description) }
+            }
+            val docs = UNIVERSAL + merged.ifEmpty { DEFAULT }
             docs.map { DocumentSlot(it.type, it.label, it.description, it.required, uploads[it.type]) }
         }
     }

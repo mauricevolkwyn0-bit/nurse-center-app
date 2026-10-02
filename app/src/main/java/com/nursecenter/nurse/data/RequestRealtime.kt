@@ -71,6 +71,8 @@ object RequestRealtime {
         synchronized(closed) { closed.clear() }
         ChatAlert.reset()
         ChatUnread.clear()
+        RequestsRepository.clearPending()
+        NotificationsRepository.clear()
         NurseStatus.clear()
         IncomingRequestAlert.cancelReminders()
         SupportRepository.reset()
@@ -147,6 +149,20 @@ object RequestRealtime {
      */
     fun onPush(context: Context, bookingId: String) = raise(context.applicationContext, bookingId, sentAt = null)
 
+    /**
+     * A `booking_cancelled` push: the client cancelled. Stops any alert for it; on screen the nurse gets the
+     * same message as the live update, in the background a notification.
+     */
+    fun onCancelPush(context: Context, bookingId: String, title: String, body: String) {
+        val app = context.applicationContext
+        if (ChatAlert.appVisible) {
+            close(app, bookingId, body)
+        } else {
+            close(app, bookingId, null)
+            BookingCancelAlert.show(app, bookingId, title, body)
+        }
+    }
+
     /** Asks screens to reload, e.g. when the app comes back to the foreground and live updates may have been missed. */
     fun refresh() {
         _changes.value++
@@ -202,11 +218,12 @@ object RequestRealtime {
             // UPDATEs arrive when the booking behind an alert is cancelled or taken (see migration 022).
             webSocket.send(message(ALERTS_TOPIC, "phx_join", joinPayload("job_alerts", listOf("INSERT", "UPDATE"), mine, token)))
             // messages has no caregiver column; its RLS policy limits delivery to the nurse's own conversations.
-            webSocket.send(message(MESSAGES_TOPIC, "phx_join", joinPayload("messages", listOf("INSERT"), null, token)))
+            // UPDATEs arrive when messages are read (here or on the website) or deleted.
+            webSocket.send(message(MESSAGES_TOPIC, "phx_join", joinPayload("messages", listOf("INSERT", "UPDATE"), null, token)))
             // Online/Offline changes made on the website.
             webSocket.send(message(STATUS_TOPIC, "phx_join", joinPayload("caregiver_profiles", listOf("UPDATE"), "id=eq.$userId", token)))
-            // Support replies; RLS limits delivery to the nurse's own support thread.
-            webSocket.send(message(SUPPORT_TOPIC, "phx_join", joinPayload("support_messages", listOf("INSERT"), null, token)))
+            // Support replies, and read receipts; RLS limits delivery to the nurse's own support thread.
+            webSocket.send(message(SUPPORT_TOPIC, "phx_join", joinPayload("support_messages", listOf("INSERT", "UPDATE"), null, token)))
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -260,23 +277,39 @@ object RequestRealtime {
                         )
                     }
                 }
-                "support_messages" -> if (type == "INSERT") {
-                    val message = runCatching { SupportRepository.toMessage(record) }.getOrNull() ?: return
-                    _messages.tryEmit(message)
-                    if (!message.mine) {
-                        ChatUnread.onIncoming(message)
-                        ChatAlert.onIncoming(context, message, "Nurse Center Support")
+                "support_messages" -> when (type) {
+                    "INSERT" -> {
+                        val message = runCatching { SupportRepository.toMessage(record) }.getOrNull() ?: return
+                        _messages.tryEmit(message)
+                        if (!message.mine) {
+                            ChatUnread.onIncoming(message)
+                            ChatAlert.onIncoming(context, message, "Nurse Center Support")
+                        }
+                    }
+                    "UPDATE" -> {
+                        if (record.optBoolean("from_staff") && !record.isNull("read_at")) ChatAlert.clear(context, SUPPORT_CHAT_ID)
+                        ChatUnread.requestRefresh()
                     }
                 }
                 "caregiver_profiles" -> if (record.has("is_available") && !record.isNull("is_available")) {
                     NurseStatus.onRemoteChange(record.getBoolean("is_available"))
                 }
-                "messages" -> if (type == "INSERT" && record.isNull("deleted_at")) {
-                    val message = runCatching { ChatRepository.toMessage(record, userId) }.getOrNull() ?: return
-                    _messages.tryEmit(message)
-                    if (!message.mine) {
-                        ChatUnread.onIncoming(message)
-                        scope.launch { ChatAlert.onIncoming(context, message, ChatRepository.senderName(message.senderId)) }
+                "messages" -> when {
+                    type == "INSERT" && record.isNull("deleted_at") -> {
+                        val message = runCatching { ChatRepository.toMessage(record, userId) }.getOrNull() ?: return
+                        _messages.tryEmit(message)
+                        if (!message.mine) {
+                            ChatUnread.onIncoming(message)
+                            scope.launch { ChatAlert.onIncoming(context, message, ChatRepository.senderName(message.senderId)) }
+                        }
+                    }
+                    // Read (in the app or on the website) or deleted: drop its notification and recheck the Chat dot.
+                    type == "UPDATE" -> {
+                        val read = !record.isNull("read_at") || !record.isNull("deleted_at")
+                        if (read && record.optString("sender_id") != userId) {
+                            record.optStringOrNull("conversation_id")?.let { ChatAlert.clear(context, it) }
+                        }
+                        ChatUnread.requestRefresh()
                     }
                 }
             }

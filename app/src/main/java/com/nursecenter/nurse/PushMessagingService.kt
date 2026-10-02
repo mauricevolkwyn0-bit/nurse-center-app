@@ -16,8 +16,8 @@ import java.time.ZonedDateTime
 
 /**
  * Receives Firebase pushes, which arrive even when the app is closed. The website sends a data-only
- * `new_booking` message (see nurse-center `app/api/push/notify/route.ts`) or `new_message` message
- * (`app/api/push/message/route.ts`); each raises the same alert as Realtime.
+ * `new_booking` (see nurse-center `app/api/push/notify/route.ts`), `new_message` (`app/api/push/message/route.ts`)
+ * or `booking_cancelled` (`app/api/push/booking-cancelled/route.ts`) message; each raises the same alert as Realtime.
  */
 class PushMessagingService : FirebaseMessagingService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -28,6 +28,13 @@ class PushMessagingService : FirebaseMessagingService() {
         when (data["type"]) {
             "new_booking" -> data["booking_id"]?.takeIf { it.isNotBlank() }?.let { RequestRealtime.onPush(applicationContext, it) }
             "new_message" -> onChatMessage(data)
+            "booking_cancelled" -> data["booking_id"]?.takeIf { it.isNotBlank() }?.let {
+                RequestRealtime.onCancelPush(
+                    applicationContext, it,
+                    title = data["title"] ?: "Booking cancelled",
+                    body = data["body"] ?: "The client cancelled this booking.",
+                )
+            }
         }
     }
 

@@ -1,8 +1,12 @@
 package com.nursecenter.nurse.data
 
+import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -20,6 +24,25 @@ data class RequestsData(
 /** Loads and responds to client requests in the Supabase `bookings` and `job_alerts` tables. */
 object RequestsRepository {
     private const val FIELDS = HomeRepository.BOOKING_FIELDS
+
+    private val _hasPending = MutableStateFlow(false)
+    /** Whether open requests are waiting for this nurse, as of the last [load]; drives the dot on the Requests tab. */
+    val hasPending: StateFlow<Boolean> = _hasPending
+
+    /** Re-checks for open requests. Best effort: keeps the last value if the check fails. */
+    suspend fun refreshPending() {
+        try {
+            load()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("RequestsRepository", "Couldn't check for requests: ${e.message}")
+        }
+    }
+
+    fun clearPending() {
+        _hasPending.value = false
+    }
 
     suspend fun load(): RequestsData = withContext(Dispatchers.IO) {
         val session = SupabaseAuth.validSession()
@@ -57,7 +80,7 @@ object RequestsRepository {
                     .distinctBy { it.id }
                     .sortedByDescending { it.requestedAt },
                 recent = objects(recent.await()).map { HomeRepository.toBooking(it, zone) },
-            )
+            ).also { _hasPending.value = it.pending.isNotEmpty() }
         }
     }
 

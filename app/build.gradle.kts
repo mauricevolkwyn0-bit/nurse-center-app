@@ -24,6 +24,8 @@ android {
 
         buildConfigField("String", "SUPABASE_URL", "\"${localProps.getProperty("supabase.url", "")}\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"${localProps.getProperty("supabase.anonKey", "")}\"")
+        // The Nurse Center website, for its API routes (SMS codes, address search).
+        buildConfigField("String", "WEB_URL", "\"${localProps.getProperty("web.url", "https://nursecenter.co.za")}\"")
     }
 
     buildTypes {

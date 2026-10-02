@@ -1,5 +1,6 @@
 package com.nursecenter.nurse.data
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -85,6 +86,7 @@ object AvailabilityRepository {
             throw AuthException("Can't reach the server. Check your internet connection.")
         }
         if (code == 401) throw AuthException("Your session has expired. Please sign in again.")
+        if (code !in 200..299) Log.w("AvailabilityRepository", "$method $path -> $code: $response")
         if (code !in 200..299) throw AuthException("Couldn't save your availability ($code). Please try again.")
         return JSONArray(response.ifBlank { "[]" })
     }

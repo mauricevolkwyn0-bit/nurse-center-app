@@ -153,6 +153,18 @@ object SupabaseAuth {
         }
     }
 
+    /** Blocking HTTP call to a Nurse Center website API route, signed in as the nurse; returns the status code and response body. */
+    internal fun webRequest(method: String, path: String, body: String?, bearer: String): Pair<Int, String> {
+        val request = Request.Builder()
+            .url(BuildConfig.WEB_URL.trimEnd('/') + path)
+            .header("Authorization", "Bearer $bearer")
+            .method(method, body?.toRequestBody("application/json".toMediaType()))
+            .build()
+        http.newCall(request).execute().use { response ->
+            return response.code to response.body?.string().orEmpty()
+        }
+    }
+
     /** Blocking upload of raw bytes (e.g. a file to Supabase Storage); returns the status code and response body. */
     internal fun upload(path: String, bytes: ByteArray, contentType: String, bearer: String, headers: Map<String, String> = emptyMap()): Pair<Int, String> {
         val builder = Request.Builder()
